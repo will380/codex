@@ -326,6 +326,13 @@ pub struct ExecCommandToolOutput {
     /// Bytes omitted by the output collection cap before model-facing truncation.
     pub output_omitted_bytes: Option<NonZeroUsize>,
     pub hook_command: Option<String>,
+    pub completion_notification: Option<ExecCommandCompletionNotification>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecCommandCompletionNotification {
+    Registered,
 }
 
 impl ToolOutput for ExecCommandToolOutput {
@@ -385,6 +392,8 @@ impl ToolOutput for ExecCommandToolOutput {
             #[serde(skip_serializing_if = "Option::is_none")]
             original_token_count: Option<usize>,
             output: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            completion_notification: Option<ExecCommandCompletionNotification>,
         }
 
         let result = UnifiedExecCodeModeResult {
@@ -397,6 +406,7 @@ impl ToolOutput for ExecCommandToolOutput {
                 Some(max_tokens) => self.truncated_output(max_tokens),
                 None => String::from_utf8_lossy(&self.raw_output).to_string(),
             },
+            completion_notification: self.completion_notification,
         };
 
         serde_json::to_value(result).unwrap_or_else(|err| {
@@ -408,6 +418,10 @@ impl ToolOutput for ExecCommandToolOutput {
 impl ExecCommandToolOutput {
     fn model_output_max_tokens(&self) -> usize {
         resolve_max_tokens(self.max_output_tokens).min(self.truncation_policy.token_budget())
+    }
+
+    pub(crate) fn model_output(&self) -> String {
+        self.truncated_output(self.model_output_max_tokens())
     }
 
     pub(crate) fn truncated_output(&self, max_tokens: usize) -> String {
@@ -452,6 +466,9 @@ impl ExecCommandToolOutput {
 
         if let Some(exit_code) = self.exit_code {
             sections.push(format!("Process exited with code {exit_code}"));
+        }
+        if let Some(notification) = self.completion_notification {
+            sections.push(format!("Completion notification: {notification:?}"));
         }
 
         if let Some(process_id) = &self.process_id {

@@ -166,6 +166,12 @@ impl UnifiedExecProcess {
         }
     }
 
+    pub(super) async fn drain_output(
+        &self,
+    ) -> crate::unified_exec::head_tail_buffer::HeadTailBuffer {
+        self.output_buffer.lock().await.drain()
+    }
+
     pub(super) fn output_receiver(&self) -> tokio::sync::broadcast::Receiver<Vec<u8>> {
         self.output_tx.subscribe()
     }

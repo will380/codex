@@ -7,6 +7,7 @@ use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::PostToolUsePayload;
+use crate::unified_exec::ExecCommandOnExit;
 use codex_exec_server::Environment;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_tools::UnifiedExecShellMode;
@@ -37,6 +38,8 @@ pub(crate) struct ExecCommandArgs {
     yield_time_ms: u64,
     #[serde(default)]
     max_output_tokens: Option<usize>,
+    #[serde(default)]
+    on_exit: ExecCommandOnExit,
     #[serde(default)]
     sandbox_permissions: SandboxPermissions,
     #[serde(default)]

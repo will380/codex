@@ -15,6 +15,7 @@ use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
 use crate::tools::events::ToolEventFailure;
 use crate::tools::events::ToolEventStage;
+use crate::unified_exec::CompletionWakeRegistration;
 use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::exec_output::StreamOutput;
@@ -114,6 +115,7 @@ pub(crate) fn spawn_exit_watcher(
     process_id: i32,
     transcript: Arc<Mutex<HeadTailBuffer>>,
     started_at: Instant,
+    completion_wakeup: Option<CompletionWakeRegistration>,
 ) {
     let exit_token = process.cancellation_token();
     let output_drained = process.output_drained_notify();
@@ -123,6 +125,7 @@ pub(crate) fn spawn_exit_watcher(
         output_drained.notified().await;
 
         let duration = Instant::now().saturating_duration_since(started_at);
+        let exit_code = process.exit_code().unwrap_or(-1);
         if let Some(message) = process.failure_message() {
             emit_failed_exec_end_for_unified_exec(
                 session_ref,
@@ -138,7 +141,6 @@ pub(crate) fn spawn_exit_watcher(
             )
             .await;
         } else {
-            let exit_code = process.exit_code().unwrap_or(-1);
             emit_exec_end_for_unified_exec(
                 session_ref,
                 turn_ref,
@@ -152,6 +154,9 @@ pub(crate) fn spawn_exit_watcher(
                 duration,
             )
             .await;
+        }
+        if let Some(completion_wakeup) = completion_wakeup {
+            completion_wakeup.complete(exit_code, duration).await;
         }
     });
 }

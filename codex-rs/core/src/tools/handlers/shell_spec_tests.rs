@@ -68,6 +68,13 @@ fn exec_command_tool_matches_expected_spec() {
                 )),
         ),
         (
+            "on_exit".to_string(),
+            JsonSchema::string_enum(
+                vec![json!("none"), json!("wake")],
+                Some("Action after a yielded background command exits. `wake` starts one batched continuation; defaults to `none`.".to_string()),
+            ),
+        ),
+        (
             "login".to_string(),
             JsonSchema::boolean(Some(
                     "True runs the shell with -l/-i semantics; false disables them. Defaults to true.".to_string(),

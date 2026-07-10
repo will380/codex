@@ -3,6 +3,7 @@ use codex_protocol::items::parse_hook_prompt_fragment;
 use codex_protocol::models::ContentItem;
 
 use super::AdditionalContextUserFragment;
+use super::ExecCommandCompletion;
 use super::FragmentRegistration;
 use super::FragmentRegistrationProxy;
 use super::InternalModelContextFragment;
@@ -26,6 +27,8 @@ static ADDITIONAL_CONTEXT_REGISTRATION: FragmentRegistrationProxy<AdditionalCont
 static SKILL_INSTRUCTIONS_REGISTRATION: FragmentRegistrationProxy<SkillInstructions> =
     FragmentRegistrationProxy::new();
 static USER_SHELL_COMMAND_REGISTRATION: FragmentRegistrationProxy<UserShellCommand> =
+    FragmentRegistrationProxy::new();
+static EXEC_COMMAND_COMPLETION_REGISTRATION: FragmentRegistrationProxy<ExecCommandCompletion> =
     FragmentRegistrationProxy::new();
 static TURN_ABORTED_REGISTRATION: FragmentRegistrationProxy<TurnAborted> =
     FragmentRegistrationProxy::new();
@@ -52,6 +55,7 @@ static CONTEXTUAL_USER_FRAGMENTS: &[&dyn FragmentRegistration] = &[
     &ADDITIONAL_CONTEXT_REGISTRATION,
     &SKILL_INSTRUCTIONS_REGISTRATION,
     &USER_SHELL_COMMAND_REGISTRATION,
+    &EXEC_COMMAND_COMPLETION_REGISTRATION,
     &TURN_ABORTED_REGISTRATION,
     &SUBAGENT_NOTIFICATION_REGISTRATION,
     &INTERNAL_MODEL_CONTEXT_REGISTRATION,

@@ -6,8 +6,11 @@ use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::user_input::UserInput;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
+
+const MAX_PENDING_EXEC_WAKEUPS: usize = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TurnInput {
@@ -35,6 +38,8 @@ pub(crate) struct TurnInputQueue {
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     mailbox_pending_mails: Mutex<VecDeque<InterAgentCommunication>>,
+    exec_wakeups: Mutex<VecDeque<(i32, ResponseItem)>>,
+    pub(crate) exec_wakeup_timer_running: AtomicBool,
 }
 
 impl InputQueue {
@@ -43,7 +48,40 @@ impl InputQueue {
         Self {
             activity_tx,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            exec_wakeups: Mutex::new(VecDeque::new()),
+            exec_wakeup_timer_running: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) async fn enqueue_exec_wakeup(&self, process_id: i32, item: ResponseItem) {
+        let mut wakeups = self.exec_wakeups.lock().await;
+        if wakeups.len() < MAX_PENDING_EXEC_WAKEUPS
+            && !wakeups
+                .iter()
+                .any(|(queued_id, _)| *queued_id == process_id)
+        {
+            wakeups.push_back((process_id, item));
+        }
+    }
+
+    pub(crate) async fn remove_exec_wakeup(&self, process_id: i32) {
+        self.exec_wakeups
+            .lock()
+            .await
+            .retain(|(queued_id, _)| *queued_id != process_id);
+    }
+
+    pub(crate) async fn drain_exec_wakeups(&self) -> Vec<ResponseItem> {
+        self.exec_wakeups
+            .lock()
+            .await
+            .drain(..)
+            .map(|(_, item)| item)
+            .collect()
+    }
+
+    pub(crate) async fn has_exec_wakeups(&self) -> bool {
+        !self.exec_wakeups.lock().await.is_empty()
     }
 
     pub(crate) async fn subscribe_activity(

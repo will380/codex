@@ -244,6 +244,7 @@ impl ExecCommandHandler {
             tty,
             yield_time_ms,
             max_output_tokens,
+            on_exit,
             sandbox_permissions,
             additional_permissions,
             justification,
@@ -337,6 +338,7 @@ impl ExecCommandHandler {
                 original_token_count: None,
                 output_omitted_bytes: None,
                 hook_command: None,
+                completion_notification: None,
             }));
         }
 
@@ -350,6 +352,7 @@ impl ExecCommandHandler {
                     process_id,
                     yield_time_ms,
                     max_output_tokens,
+                    on_exit,
                     cwd,
                     sandbox_cwd: native_environment_cwd,
                     turn_environment: turn_environment.clone(),
@@ -391,6 +394,7 @@ impl ExecCommandHandler {
                     original_token_count: Some(original_token_count),
                     output_omitted_bytes,
                     hook_command: Some(hook_command),
+                    completion_notification: None,
                 }))
             }
             Err(err) => Err(FunctionCallError::RespondToModel(format!(

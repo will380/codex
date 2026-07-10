@@ -54,6 +54,13 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
                 "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.".to_string(),
             )),
         ),
+        (
+            "on_exit".to_string(),
+            JsonSchema::string_enum(
+                vec![json!("none"), json!("wake")],
+                Some("Action after a yielded background command exits. `wake` starts one batched continuation; defaults to `none`.".to_string()),
+            ),
+        ),
     ]);
     if include_shell_parameter {
         properties.insert(
@@ -285,6 +292,11 @@ fn unified_exec_output_schema() -> Value {
             "output": {
                 "type": "string",
                 "description": "Command output text, possibly truncated."
+            },
+            "completion_notification": {
+                "type": "string",
+                "enum": ["registered"],
+                "description": "Registration status for an opt-in completion wakeup."
             }
         },
         "required": ["wall_time_seconds", "output"],

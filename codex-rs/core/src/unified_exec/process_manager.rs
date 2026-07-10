@@ -22,6 +22,7 @@ use crate::exec_policy::ExecApprovalRequest;
 use crate::sandboxing::ExecOptions;
 use crate::sandboxing::ExecRequest;
 use crate::sandboxing::ExecServerEnvConfig;
+use crate::tools::context::ExecCommandCompletionNotification;
 use crate::tools::context::ExecCommandToolOutput;
 use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
@@ -35,6 +36,8 @@ use crate::tools::runtimes::unified_exec::UnifiedExecRuntime;
 use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
+use crate::unified_exec::CompletionWakeRegistration;
+use crate::unified_exec::ExecCommandOnExit;
 use crate::unified_exec::ExecCommandRequest;
 use crate::unified_exec::MAX_UNIFIED_EXEC_PROCESSES;
 use crate::unified_exec::MAX_YIELD_TIME_MS;
@@ -211,6 +214,7 @@ struct PreparedProcessHandles {
     hook_command: String,
     process_id: i32,
     tty: bool,
+    completion_wakeup: Option<CompletionWakeRegistration>,
 }
 
 struct InitialExecCommandGuard {
@@ -453,6 +457,18 @@ impl UnifiedExecProcessManager {
         // Persist live sessions before the initial yield wait so interrupting the
         // turn cannot drop the last Arc and terminate the background process.
         let process_started_alive = !process.has_exited() && process.exit_code().is_none();
+        let completion_wakeup =
+            (process_started_alive && request.on_exit == ExecCommandOnExit::Wake).then(|| {
+                CompletionWakeRegistration::new(
+                    Arc::clone(&process),
+                    Arc::downgrade(&context.session),
+                    context.call_id.clone(),
+                    request.process_id,
+                    request.hook_command.clone(),
+                    request.max_output_tokens,
+                    context.turn.model_info.truncation_policy.into(),
+                )
+            });
         let _initial_exec_command_guard = if process_started_alive {
             let initial_exec_command_active = Arc::new(AtomicBool::new(true));
             self.store_process(
@@ -467,6 +483,7 @@ impl UnifiedExecProcessManager {
                 deferred_network_approval.clone(),
                 Arc::clone(&transcript),
                 Arc::clone(&initial_exec_command_active),
+                completion_wakeup.clone(),
             )
             .await;
             Some(InitialExecCommandGuard {
@@ -648,7 +665,16 @@ impl UnifiedExecProcessManager {
             original_token_count: Some(original_token_count),
             output_omitted_bytes,
             hook_command: Some(request.hook_command.clone()),
+            completion_notification: (response_process_id.is_some()
+                && request.on_exit == ExecCommandOnExit::Wake)
+                .then_some(ExecCommandCompletionNotification::Registered),
         };
+
+        if response.process_id.is_some()
+            && let Some(completion_wakeup) = completion_wakeup
+        {
+            completion_wakeup.arm().await;
+        }
 
         Ok(response)
     }
@@ -673,6 +699,7 @@ impl UnifiedExecProcessManager {
             hook_command,
             process_id,
             tty,
+            completion_wakeup,
             ..
         } = self.prepare_process_handles(process_id).await?;
         let mut status_after_write = None;
@@ -796,6 +823,12 @@ impl UnifiedExecProcessManager {
             }
         };
 
+        if process_id.is_none()
+            && let Some(completion_wakeup) = completion_wakeup
+        {
+            completion_wakeup.observed().await;
+        }
+
         let response = ExecCommandToolOutput {
             event_call_id,
             chunk_id,
@@ -808,6 +841,7 @@ impl UnifiedExecProcessManager {
             original_token_count: Some(original_token_count),
             output_omitted_bytes,
             hook_command: Some(hook_command),
+            completion_notification: None,
         };
 
         Ok(response)
@@ -876,6 +910,7 @@ impl UnifiedExecProcessManager {
             hook_command: entry.hook_command.clone(),
             process_id: entry.process_id,
             tty: entry.tty,
+            completion_wakeup: entry.completion_wakeup.clone(),
         })
     }
 
@@ -893,6 +928,7 @@ impl UnifiedExecProcessManager {
         network_approval: Option<DeferredNetworkApproval>,
         transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
         initial_exec_command_active: Arc<AtomicBool>,
+        completion_wakeup: Option<CompletionWakeRegistration>,
     ) {
         let entry = ProcessEntry {
             process: Arc::clone(&process),
@@ -905,6 +941,7 @@ impl UnifiedExecProcessManager {
             network_approval,
             session: Arc::downgrade(&context.session),
             last_used: started_at,
+            completion_wakeup: completion_wakeup.clone(),
         };
         let pruned_entry = {
             let mut store = self.process_store.lock().await;
@@ -916,6 +953,11 @@ impl UnifiedExecProcessManager {
         // network-approval cleanup only after dropping that lock.
         if let Some(pruned_entry) = pruned_entry {
             unregister_network_approval_for_entry(&pruned_entry).await;
+            if !pruned_entry.process.has_exited()
+                && let Some(completion_wakeup) = pruned_entry.completion_wakeup.as_ref()
+            {
+                completion_wakeup.observed().await;
+            }
             pruned_entry.process.terminate();
         }
 
@@ -929,6 +971,7 @@ impl UnifiedExecProcessManager {
             process_id,
             transcript,
             started_at,
+            completion_wakeup,
         );
     }
 
@@ -1411,6 +1454,9 @@ impl UnifiedExecProcessManager {
 
         for entry in entries {
             unregister_network_approval_for_entry(&entry).await;
+            if let Some(completion_wakeup) = entry.completion_wakeup.as_ref() {
+                completion_wakeup.observed().await;
+            }
             entry.process.terminate();
         }
     }
@@ -1465,6 +1511,9 @@ impl UnifiedExecProcessManager {
         };
 
         unregister_network_approval_for_entry(&entry).await;
+        if let Some(completion_wakeup) = entry.completion_wakeup.as_ref() {
+            completion_wakeup.observed().await;
+        }
         true
     }
 }

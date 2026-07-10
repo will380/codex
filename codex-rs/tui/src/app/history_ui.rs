@@ -7,6 +7,11 @@ use super::*;
 
 const DESKTOP_THREAD_OPENED_MESSAGE: &str = "Opened this session in Codex Desktop.";
 
+#[cfg(target_os = "windows")]
+const CODEX_WINDOWS_PACKAGE_NAME: &str = "OpenAI.Codex";
+#[cfg(target_os = "windows")]
+const CODEX_WINDOWS_PUBLISHER_ID: &str = "2p2nqsd0c76g0";
+
 impl App {
     pub(super) fn insert_history_cell(&mut self, tui: &mut tui::Tui, cell: Box<dyn HistoryCell>) {
         let cell: Arc<dyn HistoryCell> = cell.into();
@@ -230,25 +235,15 @@ fn windows_desktop_app_launch_script(url: &str) -> String {
 $ErrorActionPreference = 'Stop'
 $url = {url}
 
-$installLocation = (Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue).InstallLocation
-if ([string]::IsNullOrWhiteSpace($installLocation)) {{
+$package = Get-AppxPackage -Name '{CODEX_WINDOWS_PACKAGE_NAME}' -ErrorAction SilentlyContinue |
+    Where-Object {{ $_.PublisherId -eq '{CODEX_WINDOWS_PUBLISHER_ID}' }} |
+    Select-Object -First 1
+if ($null -eq $package) {{
     Write-Error 'Codex Desktop package is not installed'
     exit 1
 }}
 
-$appDir = Join-Path $installLocation 'app'
-$exe = Join-Path $appDir 'Codex.exe'
-$app = Join-Path $appDir 'resources\app.asar'
-if (-not (Test-Path $exe)) {{
-    Write-Error "Codex Desktop executable not found at $exe"
-    exit 1
-}}
-if (-not (Test-Path $app)) {{
-    Write-Error "Codex Desktop app bundle not found at $app"
-    exit 1
-}}
-
-Start-Process -FilePath $exe -WorkingDirectory $appDir -ArgumentList @('resources\app.asar', $url)
+Start-Process -FilePath $url
 "#
     )
 }

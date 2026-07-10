@@ -19,6 +19,22 @@ fn desktop_thread_open_error_history_snapshot() {
     insta::assert_snapshot!("desktop_thread_open_error_history", render_cell(&cell));
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_desktop_app_launch_uses_protocol_handler() {
+    let script = windows_desktop_app_launch_script("codex://threads/thread-id");
+
+    assert!(script.contains("Get-AppxPackage -Name 'OpenAI.Codex'"));
+    assert!(script.contains("PublisherId -eq '2p2nqsd0c76g0'"));
+    assert!(script.contains("Start-Process -FilePath $url"));
+    assert!(!script.contains("Get-StartApps"));
+    assert!(!script.contains("Codex.exe"));
+    assert!(!script.contains("ChatGPT.exe"));
+    assert!(!script.contains("resources\\app.asar"));
+    assert!(!script.contains("-WorkingDirectory"));
+    assert!(!script.contains("-ArgumentList"));
+}
+
 fn render_cell(cell: &impl HistoryCell) -> String {
     let lines = cell.display_lines(/*width*/ 80);
     lines

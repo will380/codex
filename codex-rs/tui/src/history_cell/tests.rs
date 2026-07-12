@@ -470,10 +470,7 @@ fn raw_mode_toggle_transcript_snapshot() {
 #[test]
 fn image_generation_call_renders_saved_path() {
     let saved_path = test_path_buf("/tmp/generated-image.png").abs();
-    let expected_saved_path = format!(
-        "  └ Saved to: {}",
-        Url::from_file_path(saved_path.as_path()).expect("test path should convert to file URL")
-    );
+    let expected_saved_path = format!("  └ Saved to: {}", saved_path.display());
     let cell = new_image_generation_call(
         "call-image-generation".to_string(),
         "completed",
@@ -489,6 +486,53 @@ fn image_generation_call_renders_saved_path() {
             expected_saved_path,
         ],
     );
+    let saved_link = cell
+        .display_hyperlink_lines(/*width*/ 80)
+        .into_iter()
+        .flat_map(|line| line.hyperlinks)
+        .next()
+        .expect("saved image path should be clickable");
+    assert!(saved_link.destination.starts_with("file:"));
+}
+
+#[test]
+fn viewed_image_path_is_a_local_file_hyperlink() {
+    let cwd = test_path_buf("/tmp/project");
+    let image = cwd.join("images/preview.png");
+    let cell = new_view_image_tool_call(
+        codex_utils_path_uri::LegacyAppPathString::from_path(image.as_path()),
+        &cwd,
+    );
+
+    let links = cell
+        .display_hyperlink_lines(/*width*/ 80)
+        .into_iter()
+        .flat_map(|line| line.hyperlinks)
+        .collect::<Vec<_>>();
+    assert_eq!(links.len(), 1);
+    assert!(links[0].destination.starts_with("file:"));
+    assert!(links[0].destination.contains("preview.png"));
+}
+
+#[test]
+fn large_patch_is_collapsed_with_an_inspect_affordance() {
+    let cwd = test_path_buf("/tmp/project");
+    let cell = new_patch_event(
+        HashMap::from([(
+            PathBuf::from("src/large.rs"),
+            FileChange::Add {
+                content: (0..25).map(|line| format!("line {line}\n")).collect(),
+            },
+        )]),
+        &cwd,
+    );
+
+    assert!(
+        render_lines(&cell.display_lines(/*width*/ 80))
+            .iter()
+            .any(|line| line.contains("Click to inspect full diff"))
+    );
+    assert!(cell.has_transcript_interaction());
 }
 
 fn session_configured_event(model: &str) -> ThreadSessionState {

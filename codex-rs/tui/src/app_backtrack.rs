@@ -32,8 +32,10 @@ use crate::app::App;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::chatwidget::UserMessage;
+use crate::diff_render::DiffSummary;
 #[cfg(test)]
 use crate::history_cell::AgentMessageCell;
+use crate::history_cell::HistoryCellInteraction;
 use crate::history_cell::SessionInfoCell;
 use crate::history_cell::UserHistoryCell;
 use crate::pager_overlay::Overlay;
@@ -376,6 +378,7 @@ impl App {
                 self.mouse_scrollback_indicator_hovered = pointer_is_over_indicator;
                 tui.frame_requester().schedule_frame();
             }
+            self.overlay_forward_event(tui, event)?;
             return Ok(true);
         }
         let jump_requested = matches!(
@@ -589,7 +592,22 @@ impl App {
 
         if let Some(overlay) = &mut self.overlay {
             overlay.handle_event(tui, event)?;
-            if overlay.is_done() {
+            let interaction = overlay.take_interaction();
+            let overlay_done = overlay.is_done();
+            if let Some(HistoryCellInteraction::OpenPatchDiff { changes, cwd }) = interaction {
+                let diff: Box<dyn crate::render::renderable::Renderable> =
+                    DiffSummary::new(changes, cwd).into();
+                self.overlay = Some(Overlay::new_static_with_renderables(
+                    vec![diff],
+                    "F U L L  D I F F".to_string(),
+                    self.keymap.pager.clone(),
+                ));
+                self.mouse_scrollback_active = false;
+                self.mouse_scrollback_indicator_hovered = false;
+                tui.frame_requester().schedule_frame();
+                return Ok(());
+            }
+            if overlay_done {
                 self.close_transcript_overlay(tui);
                 tui.frame_requester().schedule_frame();
             }

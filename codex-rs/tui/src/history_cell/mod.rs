@@ -33,6 +33,7 @@ use crate::session_state::ThreadSessionState;
 use crate::style::proposed_plan_style;
 use crate::style::user_message_style;
 use crate::terminal_hyperlinks::HyperlinkLine;
+use crate::terminal_hyperlinks::TerminalHyperlink;
 use crate::terminal_hyperlinks::mark_buffer_hyperlinks;
 use crate::terminal_hyperlinks::plain_hyperlink_lines;
 use crate::terminal_hyperlinks::prefix_hyperlink_lines;
@@ -145,6 +146,14 @@ mod tests;
 pub(crate) enum HistoryRenderMode {
     Rich,
     Raw,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum HistoryCellInteraction {
+    OpenPatchDiff {
+        changes: HashMap<PathBuf, FileChange>,
+        cwd: AbsolutePathBuf,
+    },
 }
 
 pub(crate) fn raw_lines_from_source(source: &str) -> Vec<Line<'static>> {
@@ -294,6 +303,15 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
     /// the first rendered frame even though the main viewport is animating.
     fn transcript_animation_tick(&self) -> Option<u64> {
         None
+    }
+
+    /// Optional action for transcript cells that behave like compact interactive objects.
+    fn transcript_interaction(&self) -> Option<HistoryCellInteraction> {
+        None
+    }
+
+    fn has_transcript_interaction(&self) -> bool {
+        false
     }
 }
 

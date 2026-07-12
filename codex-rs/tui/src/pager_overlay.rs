@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use crate::chatwidget::ActiveCellTranscriptKey;
 use crate::history_cell::HistoryCell;
+use crate::history_cell::HistoryCellInteraction;
 use crate::history_cell::UserHistoryCell;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
@@ -36,6 +37,7 @@ use crate::tui;
 use crate::tui::TuiEvent;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
+use crossterm::event::MouseButton;
 use crossterm::event::MouseEventKind;
 use ratatui::buffer::Buffer;
 use ratatui::buffer::Cell;
@@ -97,6 +99,13 @@ impl Overlay {
             Overlay::Static(_) => false,
         }
     }
+
+    pub(crate) fn take_interaction(&mut self) -> Option<HistoryCellInteraction> {
+        match self {
+            Overlay::Transcript(o) => o.pending_interaction.take(),
+            Overlay::Static(_) => None,
+        }
+    }
 }
 
 fn first_or_empty(bindings: &[KeyBinding]) -> Vec<KeyBinding> {
@@ -134,6 +143,11 @@ struct PagerView {
     last_rendered_height: Option<usize>,
     /// If set, on next render ensure this chunk is visible.
     pending_scroll_chunk: Option<usize>,
+    /// Cached wrapped layout. Scrolling changes the viewport, not cell geometry.
+    layout_width: Option<u16>,
+    layout_starts: Vec<usize>,
+    layout_heights: Vec<usize>,
+    last_content_area: Option<Rect>,
 }
 
 impl PagerView {
@@ -151,22 +165,70 @@ impl PagerView {
             last_content_height: None,
             last_rendered_height: None,
             pending_scroll_chunk: None,
+            layout_width: None,
+            layout_starts: Vec::new(),
+            layout_heights: Vec::new(),
+            last_content_area: None,
         }
     }
 
-    fn content_height(&self, width: u16) -> usize {
-        self.renderables
-            .iter()
-            .map(|c| c.desired_height(width) as usize)
-            .sum()
+    fn ensure_layout(&mut self, width: u16) {
+        if self.layout_width == Some(width) && self.layout_heights.len() == self.renderables.len() {
+            return;
+        }
+        self.layout_width = Some(width);
+        self.layout_starts.clear();
+        self.layout_heights.clear();
+        let mut start = 0usize;
+        for renderable in &self.renderables {
+            let height = usize::from(renderable.desired_height(width));
+            self.layout_starts.push(start);
+            self.layout_heights.push(height);
+            start = start.saturating_add(height);
+        }
+    }
+
+    fn content_height(&self) -> usize {
+        self.layout_starts
+            .last()
+            .zip(self.layout_heights.last())
+            .map_or(0, |(start, height)| start.saturating_add(*height))
+    }
+
+    fn replace_renderables(&mut self, renderables: Vec<Box<dyn Renderable>>) {
+        self.renderables = renderables;
+        self.layout_width = None;
+        self.layout_starts.clear();
+        self.layout_heights.clear();
+    }
+
+    fn push_renderable(&mut self, renderable: Box<dyn Renderable>) {
+        if let Some(width) = self.layout_width {
+            let start = self.content_height();
+            self.layout_starts.push(start);
+            self.layout_heights
+                .push(usize::from(renderable.desired_height(width)));
+        }
+        self.renderables.push(renderable);
+    }
+
+    fn pop_renderable(&mut self) -> Option<Box<dyn Renderable>> {
+        let renderable = self.renderables.pop()?;
+        if self.layout_heights.len() > self.renderables.len() {
+            self.layout_heights.pop();
+            self.layout_starts.pop();
+        }
+        Some(renderable)
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer) {
         Clear.render(area, buf);
         self.render_header(area, buf);
         let content_area = self.content_area(area);
+        self.last_content_area = Some(content_area);
         self.update_last_content_height(content_area.height);
-        let content_height = self.content_height(content_area.width);
+        self.ensure_layout(content_area.width);
+        let content_height = self.content_height();
         self.last_rendered_height = Some(content_height);
         // If there is a pending request to scroll a specific chunk into view,
         // satisfy it now that wrapping is up to date for this width.
@@ -182,6 +244,22 @@ impl PagerView {
         self.render_bottom_bar(area, content_area, buf, content_height);
     }
 
+    /// Render only transcript content for ordinary mouse scrollback. The full pager title and
+    /// percentage bar belong to the explicit Ctrl+T view; showing them above the anchored composer
+    /// makes normal history scrolling feel like an unrelated modal.
+    fn render_bare(&mut self, area: Rect, buf: &mut Buffer) {
+        Clear.render(area, buf);
+        self.last_content_area = Some(area);
+        self.update_last_content_height(area.height);
+        self.ensure_layout(area.width);
+        let content_height = self.content_height();
+        self.last_rendered_height = Some(content_height);
+        self.scroll_offset = self
+            .scroll_offset
+            .min(content_height.saturating_sub(usize::from(area.height)));
+        self.render_content(area, buf);
+    }
+
     fn render_header(&self, area: Rect, buf: &mut Buffer) {
         Span::from("/ ".repeat(area.width as usize / 2))
             .dim()
@@ -191,25 +269,34 @@ impl PagerView {
     }
 
     fn render_content(&self, area: Rect, buf: &mut Buffer) {
-        let mut y = -(self.scroll_offset as isize);
         let mut drawn_bottom = area.y;
-        for renderable in &self.renderables {
-            let top = y;
-            let height = renderable.desired_height(area.width) as isize;
-            y += height;
-            let bottom = y;
-            if bottom < area.y as isize {
+        let viewport_top = self.scroll_offset;
+        let viewport_bottom = viewport_top.saturating_add(usize::from(area.height));
+        let first = self
+            .layout_starts
+            .partition_point(|start| *start < viewport_top)
+            .saturating_sub(1);
+        for index in first..self.renderables.len() {
+            let start = self.layout_starts[index];
+            let height = self.layout_heights[index];
+            let bottom = start.saturating_add(height);
+            if bottom <= viewport_top {
                 continue;
             }
-            if top > area.y as isize + area.height as isize {
+            if start >= viewport_bottom {
                 break;
             }
-            if top < 0 {
-                let drawn = render_offset_content(area, buf, &**renderable, (-top) as u16);
+            let renderable = &self.renderables[index];
+            if start < viewport_top {
+                let offset = u16::try_from(viewport_top - start).unwrap_or(u16::MAX);
+                let drawn = render_offset_content(area, buf, &**renderable, offset);
                 drawn_bottom = drawn_bottom.max(area.y + drawn);
             } else {
-                let draw_height = (height as u16).min(area.height.saturating_sub(top as u16));
-                let draw_area = Rect::new(area.x, area.y + top as u16, area.width, draw_height);
+                let top = u16::try_from(start - viewport_top).unwrap_or(u16::MAX);
+                let draw_height = u16::try_from(height)
+                    .unwrap_or(u16::MAX)
+                    .min(area.height.saturating_sub(top));
+                let draw_area = Rect::new(area.x, area.y + top, area.width, draw_height);
                 renderable.render(draw_area, buf);
                 drawn_bottom = drawn_bottom.max(draw_area.y.saturating_add(draw_area.height));
             }
@@ -331,6 +418,22 @@ impl PagerView {
         area.height = area.height.saturating_sub(2);
         area
     }
+
+    fn renderable_index_at(&self, column: u16, row: u16) -> Option<usize> {
+        let area = self.last_content_area?;
+        if column < area.x || column >= area.right() || row < area.y || row >= area.bottom() {
+            return None;
+        }
+        let logical_row = self
+            .scroll_offset
+            .saturating_add(usize::from(row.saturating_sub(area.y)));
+        let index = self
+            .layout_starts
+            .partition_point(|start| *start <= logical_row)
+            .checked_sub(1)?;
+        (logical_row < self.layout_starts[index].saturating_add(self.layout_heights[index]))
+            .then_some(index)
+    }
 }
 
 impl PagerView {
@@ -363,13 +466,9 @@ impl PagerView {
         if area.height == 0 || idx >= self.renderables.len() {
             return;
         }
-        let first = self
-            .renderables
-            .iter()
-            .take(idx)
-            .map(|r| r.desired_height(area.width) as usize)
-            .sum();
-        let last = first + self.renderables[idx].desired_height(area.width) as usize;
+        self.ensure_layout(area.width);
+        let first = self.layout_starts[idx];
+        let last = first.saturating_add(self.layout_heights[idx]);
         let current_top = self.scroll_offset;
         let current_bottom = current_top.saturating_add(area.height.saturating_sub(1) as usize);
         if first < current_top {
@@ -461,6 +560,8 @@ pub(crate) struct TranscriptOverlay {
     /// Committed transcript cells (does not include the live tail).
     cells: Vec<Arc<dyn HistoryCell>>,
     highlight_cell: Option<usize>,
+    hovered_cell: Option<usize>,
+    pending_interaction: Option<HistoryCellInteraction>,
     /// Cache key for the render-only live tail appended after committed cells.
     live_tail_key: Option<LiveTailKey>,
     is_done: bool,
@@ -489,13 +590,19 @@ impl TranscriptOverlay {
     pub(crate) fn new(transcript_cells: Vec<Arc<dyn HistoryCell>>, keymap: PagerKeymap) -> Self {
         Self {
             view: PagerView::new(
-                Self::render_cells(&transcript_cells, /*highlight_cell*/ None),
+                Self::render_cells(
+                    &transcript_cells,
+                    /*highlight_cell*/ None,
+                    /*hovered_cell*/ None,
+                ),
                 "T R A N S C R I P T".to_string(),
                 usize::MAX,
                 keymap,
             ),
             cells: transcript_cells,
             highlight_cell: None,
+            hovered_cell: None,
+            pending_interaction: None,
             live_tail_key: None,
             is_done: false,
         }
@@ -504,17 +611,21 @@ impl TranscriptOverlay {
     fn render_cells(
         cells: &[Arc<dyn HistoryCell>],
         highlight_cell: Option<usize>,
+        hovered_cell: Option<usize>,
     ) -> Vec<Box<dyn Renderable>> {
         cells
             .iter()
             .enumerate()
             .flat_map(|(i, c)| {
                 let mut v: Vec<Box<dyn Renderable>> = Vec::new();
+                let hovered = hovered_cell == Some(i) && c.has_transcript_interaction();
                 let mut cell_renderable = if c.as_any().is::<UserHistoryCell>() {
                     Box::new(CachedRenderable::new(CellRenderable {
                         cell: c.clone(),
                         style: if highlight_cell == Some(i) {
                             user_message_style().reversed()
+                        } else if hovered {
+                            user_message_style().reversed().bold()
                         } else {
                             user_message_style()
                         },
@@ -522,7 +633,11 @@ impl TranscriptOverlay {
                 } else {
                     Box::new(CachedRenderable::new(CellRenderable {
                         cell: c.clone(),
-                        style: Style::default(),
+                        style: if hovered {
+                            Style::default().reversed().bold()
+                        } else {
+                            Style::default()
+                        },
                     })) as Box<dyn Renderable>
                 };
                 if !c.is_stream_continuation() && i > 0 {
@@ -554,7 +669,11 @@ impl TranscriptOverlay {
         let had_prior_cells = !self.cells.is_empty();
         let tail_renderable = self.take_live_tail_renderable();
         self.cells.push(cell);
-        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);
+        self.view.replace_renderables(Self::render_cells(
+            &self.cells,
+            self.highlight_cell,
+            self.hovered_cell,
+        ));
         if let Some(tail) = tail_renderable {
             let tail = if !had_prior_cells
                 && self
@@ -572,7 +691,7 @@ impl TranscriptOverlay {
             } else {
                 tail
             };
-            self.view.renderables.push(tail);
+            self.view.push_renderable(tail);
         }
         if follow_bottom {
             self.view.scroll_offset = usize::MAX;
@@ -678,7 +797,7 @@ impl TranscriptOverlay {
         if let Some(key) = next_key {
             let lines = compute_lines(width).unwrap_or_default();
             if !lines.is_empty() {
-                self.view.renderables.push(Self::live_tail_renderable(
+                self.view.push_renderable(Self::live_tail_renderable(
                     lines,
                     !self.cells.is_empty(),
                     key.is_stream_continuation,
@@ -708,9 +827,16 @@ impl TranscriptOverlay {
 
     fn rebuild_renderables(&mut self) {
         let tail_renderable = self.take_live_tail_renderable();
-        self.view.renderables = Self::render_cells(&self.cells, self.highlight_cell);
+        self.view.replace_renderables(Self::render_cells(
+            &self.cells,
+            self.highlight_cell,
+            self.hovered_cell,
+        ));
         if let Some(tail) = tail_renderable {
-            self.view.renderables.push(tail);
+            self.view.push_renderable(tail);
+        }
+        if let Some(area) = self.view.last_content_area {
+            self.view.ensure_layout(area.width);
         }
     }
 
@@ -720,7 +846,7 @@ impl TranscriptOverlay {
     /// cell renderables, so this relies on the live tail always being the final entry in
     /// `view.renderables` when present.
     fn take_live_tail_renderable(&mut self) -> Option<Box<dyn Renderable>> {
-        (self.view.renderables.len() > self.cells.len()).then(|| self.view.renderables.pop())?
+        (self.view.renderables.len() > self.cells.len()).then(|| self.view.pop_renderable())?
     }
 
     fn live_tail_renderable(
@@ -799,7 +925,15 @@ impl TranscriptOverlay {
     }
 
     pub(crate) fn render_scrollback(&mut self, area: Rect, buf: &mut Buffer) {
-        self.view.render(area, buf);
+        self.view.render_bare(area, buf);
+    }
+
+    fn interactive_cell_at(&self, column: u16, row: u16) -> Option<usize> {
+        let index = self.view.renderable_index_at(column, row)?;
+        self.cells
+            .get(index)?
+            .has_transcript_interaction()
+            .then_some(index)
     }
 }
 
@@ -819,6 +953,21 @@ impl TranscriptOverlay {
                 match mouse_event.kind {
                     MouseEventKind::ScrollUp => self.view.scroll_lines_up(tui, 3),
                     MouseEventKind::ScrollDown => self.view.scroll_lines_down(tui, 3),
+                    MouseEventKind::Moved => {
+                        let hovered = self.interactive_cell_at(mouse_event.column, mouse_event.row);
+                        if self.hovered_cell != hovered {
+                            self.hovered_cell = hovered;
+                            self.rebuild_renderables();
+                            tui.frame_requester().schedule_frame();
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some(index) =
+                            self.interactive_cell_at(mouse_event.column, mouse_event.row)
+                        {
+                            self.pending_interaction = self.cells[index].transcript_interaction();
+                        }
+                    }
                     _ => {}
                 }
                 Ok(())
@@ -977,6 +1126,8 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use crate::diff_model::FileChange;
@@ -1042,6 +1193,75 @@ mod tests {
         )
     }
 
+    struct CountingRenderable {
+        desired_height_calls: Arc<AtomicUsize>,
+    }
+
+    impl Renderable for CountingRenderable {
+        fn render(&self, _area: Rect, _buf: &mut Buffer) {}
+
+        fn desired_height(&self, _width: u16) -> u16 {
+            self.desired_height_calls.fetch_add(1, Ordering::Relaxed);
+            1
+        }
+    }
+
+    #[test]
+    fn scrolling_reuses_cached_transcript_layout() {
+        let desired_height_calls = Arc::new(AtomicUsize::new(0));
+        let renderables = (0..500)
+            .map(|_| {
+                Box::new(CountingRenderable {
+                    desired_height_calls: desired_height_calls.clone(),
+                }) as Box<dyn Renderable>
+            })
+            .collect();
+        let mut pager = pager_view(renderables, "PERF", /*scroll_offset*/ 0);
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+
+        pager.render(area, &mut buf);
+        assert_eq!(desired_height_calls.load(Ordering::Relaxed), 500);
+        pager.scroll_offset = 10;
+        pager.render(area, &mut buf);
+
+        assert_eq!(desired_height_calls.load(Ordering::Relaxed), 500);
+    }
+
+    #[tokio::test]
+    async fn patch_summary_hover_and_click_produce_full_diff_interaction() -> std::io::Result<()> {
+        let cwd = std::env::current_dir()?;
+        let changes = HashMap::from([(
+            PathBuf::from("src/large.rs"),
+            FileChange::Add {
+                content: (0..25).map(|line| format!("line {line}\n")).collect(),
+            },
+        )]);
+        let mut overlay = transcript_overlay(vec![Arc::new(new_patch_event(changes, &cwd))]);
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+        overlay.render(area, &mut buf);
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        let pointer = |kind| {
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 1,
+                row: 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            })
+        };
+
+        overlay.handle_event(&mut tui, pointer(MouseEventKind::Moved))?;
+        assert_eq!(overlay.hovered_cell, Some(0));
+        overlay.handle_event(&mut tui, pointer(MouseEventKind::Down(MouseButton::Left)))?;
+
+        assert!(matches!(
+            overlay.pending_interaction,
+            Some(HistoryCellInteraction::OpenPatchDiff { .. })
+        ));
+        Ok(())
+    }
+
     #[test]
     fn edit_prev_hint_is_visible() {
         let mut overlay = transcript_overlay(vec![Arc::new(TestCell {
@@ -1058,6 +1278,22 @@ mod tests {
             s.contains("edit prev"),
             "expected 'edit prev' hint in overlay footer, got: {s:?}"
         );
+    }
+
+    #[test]
+    fn mouse_scrollback_omits_transcript_pager_chrome() {
+        let mut overlay = transcript_overlay(vec![Arc::new(TestCell {
+            lines: vec![Line::from("history line")],
+        })]);
+        let area = Rect::new(0, 0, 80, 8);
+        let mut buf = Buffer::empty(area);
+
+        overlay.render_scrollback(area, &mut buf);
+
+        let rendered = buffer_to_text(&buf, area);
+        assert!(rendered.contains("history line"));
+        assert!(!rendered.contains("T R A N S C R I P T"));
+        assert!(!rendered.contains("100%"));
     }
 
     #[test]
@@ -1508,7 +1744,7 @@ mod tests {
 
     #[test]
     fn pager_view_content_height_counts_renderables() {
-        let pv = pager_view(
+        let mut pv = pager_view(
             vec![
                 paragraph_block("a", /*lines*/ 2),
                 paragraph_block("b", /*lines*/ 3),
@@ -1517,7 +1753,8 @@ mod tests {
             /*scroll_offset*/ 0,
         );
 
-        assert_eq!(pv.content_height(/*width*/ 80), 5);
+        pv.ensure_layout(/*width*/ 80);
+        assert_eq!(pv.content_height(), 5);
     }
 
     #[test]

@@ -434,28 +434,16 @@ pub(crate) struct ComposerDraftSnapshot {
 const FOOTER_SPACING_HEIGHT: u16 = 1;
 
 fn render_rounded_background(area: Rect, buf: &mut Buffer, style: Style) {
-    if area.is_empty() {
-        return;
-    }
-    if area.width < 3 {
-        buf.set_style(area, style);
+    if area.width <= 2 || area.height <= 2 {
         return;
     }
 
-    let inset_row = Rect::new(area.x + 1, area.y, area.width - 2, 1);
-    buf.set_style(inset_row, style);
-    if area.height > 2 {
-        buf.set_style(
-            Rect::new(area.x, area.y + 1, area.width, area.height - 2),
-            style,
-        );
-    }
-    if area.height > 1 {
-        buf.set_style(
-            Rect::new(area.x + 1, area.bottom() - 1, area.width - 2, 1),
-            style,
-        );
-    }
+    // Terminal backgrounds always fill the entire cell. Keep the fill strictly inside the
+    // border so the top and bottom rows do not reveal a square surface behind rounded glyphs.
+    buf.set_style(
+        Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2),
+        style,
+    );
 }
 
 /// Builds the one-line nudge that replaces the ambient footer without adding layout height.
@@ -4679,10 +4667,19 @@ mod tests {
         for corner in [(0, 0), (7, 0), (0, 3), (7, 3)] {
             assert_eq!(buf[corner].bg, Color::Reset);
         }
-        assert_eq!(buf[(1, 0)].bg, Color::DarkGray);
-        assert_eq!(buf[(0, 1)].bg, Color::DarkGray);
-        assert_eq!(buf[(7, 2)].bg, Color::DarkGray);
-        assert_eq!(buf[(6, 3)].bg, Color::DarkGray);
+        for x in 0..area.width {
+            assert_eq!(buf[(x, 0)].bg, Color::Reset);
+            assert_eq!(buf[(x, area.height - 1)].bg, Color::Reset);
+        }
+        for y in 0..area.height {
+            assert_eq!(buf[(0, y)].bg, Color::Reset);
+            assert_eq!(buf[(area.width - 1, y)].bg, Color::Reset);
+        }
+        for y in 1..area.height - 1 {
+            for x in 1..area.width - 1 {
+                assert_eq!(buf[(x, y)].bg, Color::DarkGray);
+            }
+        }
     }
 
     #[test]

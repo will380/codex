@@ -52,7 +52,7 @@ impl HyperlinkLine {
         let end = start + span.content.width();
         self.line.push_span(span);
         if end > start
-            && let Some(destination) = destination.and_then(web_destination)
+            && let Some(destination) = destination.and_then(terminal_destination)
         {
             self.hyperlinks.push(TerminalHyperlink {
                 columns: start..end,
@@ -308,10 +308,7 @@ fn has_unmatched_closing_delimiter(candidate: &str, closing: char) -> bool {
 }
 
 pub(crate) fn web_destination(destination: &str) -> Option<String> {
-    let safe_destination = destination
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .collect::<String>();
+    let safe_destination = sanitized_destination(destination);
     let parsed = Url::parse(&safe_destination).ok()?;
     matches!(parsed.scheme(), "http" | "https")
         .then(|| parsed.host_str())
@@ -319,8 +316,22 @@ pub(crate) fn web_destination(destination: &str) -> Option<String> {
     Some(safe_destination)
 }
 
+fn terminal_destination(destination: &str) -> Option<String> {
+    let safe_destination = sanitized_destination(destination);
+    let parsed = Url::parse(&safe_destination).ok()?;
+    match parsed.scheme() {
+        "http" | "https" if parsed.host_str().is_some() => Some(safe_destination),
+        "file" if parsed.to_file_path().is_ok() => Some(safe_destination),
+        _ => None,
+    }
+}
+
+fn sanitized_destination(destination: &str) -> String {
+    destination.chars().filter(|ch| !ch.is_control()).collect()
+}
+
 pub(crate) fn osc8_hyperlink(destination: &str, text: &str) -> String {
-    let Some(safe_destination) = web_destination(destination) else {
+    let Some(safe_destination) = terminal_destination(destination) else {
         return text.to_string();
     };
     format!("\x1b]8;;{safe_destination}\x07{text}\x1b]8;;\x07")
@@ -388,7 +399,7 @@ pub(crate) fn decorate_spans(line: &HyperlinkLine) -> Vec<Span<'static>> {
                     append_to_last_span(&mut out, "\x1b]8;;\x07");
                 }
                 active_destination = selected_link_index
-                    .and_then(|index| web_destination(&line.hyperlinks[index].destination));
+                    .and_then(|index| terminal_destination(&line.hyperlinks[index].destination));
                 if let Some(destination) = active_destination.as_ref() {
                     push_styled_content(
                         &mut out,
@@ -501,7 +512,7 @@ fn mark_matching_cells(
     destination: &str,
     matches: impl Fn(&ratatui::buffer::Cell) -> bool,
 ) {
-    if web_destination(destination).is_none() {
+    if terminal_destination(destination).is_none() {
         return;
     }
     for position in area.positions() {
@@ -519,8 +530,12 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn only_web_destinations_receive_osc8() {
+    fn web_and_local_file_destinations_receive_osc8() {
         assert!(osc8_hyperlink("https://example.com/a", "a").contains("\x1b]8;;"));
+        let file_url = Url::from_file_path(std::env::temp_dir().join("image.png"))
+            .expect("temporary file path should convert to a file URL")
+            .to_string();
+        assert!(osc8_hyperlink(&file_url, "image.png").contains("\x1b]8;;"));
         assert_eq!(osc8_hyperlink("mailto:a@example.com", "a"), "a");
         assert_eq!(
             osc8_hyperlink("https://example.com/\u{7}safe", "a"),

@@ -24,6 +24,35 @@ impl HistoryCell for PlainHistoryCell {
 }
 
 #[derive(Debug)]
+pub(crate) struct HyperlinkHistoryCell {
+    lines: Vec<HyperlinkLine>,
+}
+
+impl HyperlinkHistoryCell {
+    pub(crate) fn new(lines: Vec<HyperlinkLine>) -> Self {
+        Self { lines }
+    }
+}
+
+impl HistoryCell for HyperlinkHistoryCell {
+    fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+        visible_lines(self.lines.clone())
+    }
+
+    fn display_hyperlink_lines(&self, _width: u16) -> Vec<HyperlinkLine> {
+        self.lines.clone()
+    }
+
+    fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        self.display_hyperlink_lines(width)
+    }
+
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        plain_lines(visible_lines(self.lines.clone()))
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct WebHyperlinkHistoryCell {
     lines: Vec<Line<'static>>,
 }

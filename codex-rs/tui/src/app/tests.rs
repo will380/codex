@@ -163,6 +163,7 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
         }]),
         McpServerStatusDetail::ToolsAndAuthOnly,
         /*thread_id*/ None,
+        crate::app_event::McpInventoryPresentation::History,
     );
 
     assert_eq!(app.transcript_cells.len(), 0);
@@ -177,6 +178,7 @@ async fn handle_mcp_inventory_result_respects_origin_thread() {
         Ok(Vec::new()),
         McpServerStatusDetail::ToolsAndAuthOnly,
         Some(ThreadId::new()),
+        crate::app_event::McpInventoryPresentation::History,
     );
 
     assert_eq!(app.transcript_cells.len(), 1);

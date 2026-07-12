@@ -144,6 +144,12 @@ pub(crate) enum KeymapEditIntent {
     ReplaceOne { old_key: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpInventoryPresentation {
+    History,
+    Manager,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {
@@ -633,10 +639,11 @@ pub(crate) enum AppEvent {
     /// Abandon the post-install plugin app-auth flow.
     PluginInstallAuthAbandon,
 
-    /// Fetch MCP inventory via app-server RPCs and render it into history.
+    /// Fetch MCP inventory via app-server RPCs for history or the manager popup.
     FetchMcpInventory {
         detail: McpServerStatusDetail,
         thread_id: Option<ThreadId>,
+        presentation: McpInventoryPresentation,
     },
 
     /// Result of fetching MCP inventory via app-server RPCs.
@@ -644,6 +651,25 @@ pub(crate) enum AppEvent {
         result: Result<Vec<McpServerStatus>, String>,
         detail: McpServerStatusDetail,
         thread_id: Option<ThreadId>,
+        presentation: McpInventoryPresentation,
+    },
+
+    /// Start browser-based OAuth for one configured MCP server.
+    StartMcpOauthLogin {
+        name: String,
+        thread_id: Option<ThreadId>,
+    },
+
+    /// Result of requesting the MCP OAuth authorization URL.
+    McpOauthLoginStarted {
+        name: String,
+        thread_id: Option<ThreadId>,
+        result: Result<String, String>,
+    },
+
+    /// Open the action menu for one MCP server selected in the manager.
+    OpenMcpServerActions {
+        status: McpServerStatus,
     },
 
     /// Result of the startup skills refresh that runs after the first frame is scheduled.

@@ -19,6 +19,8 @@ use codex_app_server_protocol::MarketplaceRemoveParams;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeParams;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
+use codex_app_server_protocol::McpServerOauthLoginParams;
+use codex_app_server_protocol::McpServerOauthLoginResponse;
 
 use codex_app_server_protocol::RequestId;
 
@@ -40,6 +42,7 @@ impl App {
         app_server: &AppServerSession,
         detail: McpServerStatusDetail,
         thread_id: Option<ThreadId>,
+        presentation: crate::app_event::McpInventoryPresentation,
     ) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
@@ -52,8 +55,69 @@ impl App {
                 result,
                 detail,
                 thread_id,
+                presentation,
             });
         });
+    }
+
+    pub(super) fn start_mcp_oauth_login(
+        &mut self,
+        app_server: &AppServerSession,
+        name: String,
+        thread_id: Option<ThreadId>,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let request_id = RequestId::String(format!("mcp-oauth-{}", Uuid::new_v4()));
+            let params = McpServerOauthLoginParams {
+                name: name.clone(),
+                thread_id: thread_id.map(|id| id.to_string()),
+                scopes: None,
+                timeout_secs: None,
+            };
+            let result: Result<McpServerOauthLoginResponse, _> = request_handle
+                .request_typed(ClientRequest::McpServerOauthLogin { request_id, params })
+                .await;
+            app_event_tx.send(AppEvent::McpOauthLoginStarted {
+                name,
+                thread_id,
+                result: result
+                    .map(|response| response.authorization_url)
+                    .map_err(|err| err.to_string()),
+            });
+        });
+    }
+
+    pub(super) fn handle_mcp_oauth_login_started(
+        &mut self,
+        name: String,
+        thread_id: Option<ThreadId>,
+        result: Result<String, String>,
+    ) {
+        if thread_id.is_some() && thread_id != self.current_displayed_thread_id() {
+            return;
+        }
+        match result {
+            Ok(url) => {
+                if let Err(err) = webbrowser::open(&url) {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to open browser for MCP server '{name}': {err}"
+                    ));
+                } else {
+                    self.chat_widget.add_info_message(
+                        format!("Opened browser to authenticate MCP server '{name}'."),
+                        Some(
+                            "Complete sign-in in your browser; Codex will report when it finishes."
+                                .to_string(),
+                        ),
+                    );
+                }
+            }
+            Err(err) => self.chat_widget.add_error_message(format!(
+                "Failed to start OAuth for MCP server '{name}': {err}"
+            )),
+        }
     }
 
     fn mcp_inventory_request_thread_id(&self, thread_id: Option<ThreadId>) -> Option<ThreadId> {
@@ -673,22 +737,43 @@ impl App {
         result: Result<Vec<McpServerStatus>, String>,
         detail: McpServerStatusDetail,
         thread_id: Option<ThreadId>,
+        presentation: crate::app_event::McpInventoryPresentation,
     ) {
         if thread_id.is_some() && thread_id != self.current_displayed_thread_id() {
             return;
         }
 
-        self.chat_widget.clear_mcp_inventory_loading();
-        self.clear_committed_mcp_inventory_loading();
+        if matches!(
+            presentation,
+            crate::app_event::McpInventoryPresentation::History
+        ) {
+            self.chat_widget.clear_mcp_inventory_loading();
+            self.clear_committed_mcp_inventory_loading();
+        }
 
         let statuses = match result {
             Ok(statuses) => statuses,
             Err(err) => {
-                self.chat_widget
-                    .add_error_message(format!("Failed to load MCP inventory: {err}"));
+                if matches!(
+                    presentation,
+                    crate::app_event::McpInventoryPresentation::Manager
+                ) {
+                    self.chat_widget.on_mcp_manager_loaded(Err(err));
+                } else {
+                    self.chat_widget
+                        .add_error_message(format!("Failed to load MCP inventory: {err}"));
+                }
                 return;
             }
         };
+
+        if matches!(
+            presentation,
+            crate::app_event::McpInventoryPresentation::Manager
+        ) {
+            self.chat_widget.on_mcp_manager_loaded(Ok(statuses));
+            return;
+        }
 
         if statuses.is_empty() {
             self.chat_widget

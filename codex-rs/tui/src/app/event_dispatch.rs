@@ -764,15 +764,33 @@ impl App {
                         .on_plugin_enabled_set(cwd, plugin_id, enabled, result);
                 }
             }
-            AppEvent::FetchMcpInventory { detail, thread_id } => {
-                self.fetch_mcp_inventory(app_server, detail, thread_id);
+            AppEvent::FetchMcpInventory {
+                detail,
+                thread_id,
+                presentation,
+            } => {
+                self.fetch_mcp_inventory(app_server, detail, thread_id, presentation);
             }
             AppEvent::McpInventoryLoaded {
                 result,
                 detail,
                 thread_id,
+                presentation,
             } => {
-                self.handle_mcp_inventory_result(result, detail, thread_id);
+                self.handle_mcp_inventory_result(result, detail, thread_id, presentation);
+            }
+            AppEvent::StartMcpOauthLogin { name, thread_id } => {
+                self.start_mcp_oauth_login(app_server, name, thread_id);
+            }
+            AppEvent::McpOauthLoginStarted {
+                name,
+                thread_id,
+                result,
+            } => {
+                self.handle_mcp_oauth_login_started(name, thread_id, result);
+            }
+            AppEvent::OpenMcpServerActions { status } => {
+                self.chat_widget.open_mcp_server_actions(status);
             }
             AppEvent::SkillsListLoaded { result } => {
                 self.handle_skills_list_result(

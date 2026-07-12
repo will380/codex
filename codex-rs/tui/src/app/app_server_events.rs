@@ -75,6 +75,11 @@ impl App {
             ServerNotification::McpServerStatusUpdated(_) => {
                 self.refresh_mcp_startup_expected_servers_from_config();
             }
+            ServerNotification::McpServerOauthLoginCompleted(notification) => {
+                self.chat_widget
+                    .on_mcp_oauth_login_completed(notification.clone());
+                return;
+            }
             ServerNotification::AccountRateLimitsUpdated(notification) => {
                 self.chat_widget
                     .on_rolling_rate_limit_snapshot(notification.rate_limits.clone());

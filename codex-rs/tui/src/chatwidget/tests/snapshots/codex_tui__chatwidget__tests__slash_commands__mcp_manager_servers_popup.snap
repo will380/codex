@@ -1,0 +1,16 @@
+---
+source: tui/src/chatwidget/tests/slash_commands.rs
+assertion_line: 2329
+expression: "render_bottom_popup(&chat, 80)"
+---
+  MCP servers
+  Select a server to inspect tools or manage authentication.
+
+  Type to search MCP servers
+› docs         OAuth connected · 0 tools. Press Enter for tools, details, and
+               authentication options.
+  github       Sign-in required · 0 tools
+  local-files  No authentication · 0 tools
+  sentry       Bearer token · 0 tools
+
+  Press enter to confirm or esc to go back

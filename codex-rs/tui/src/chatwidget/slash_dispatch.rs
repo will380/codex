@@ -479,7 +479,7 @@ impl ChatWidget {
                 self.add_app_server_stub_message("Memory maintenance");
             }
             SlashCommand::Mcp => {
-                self.add_mcp_output(McpServerStatusDetail::ToolsAndAuthOnly);
+                self.open_mcp_manager();
             }
             SlashCommand::Apps => {
                 self.add_connectors_output();

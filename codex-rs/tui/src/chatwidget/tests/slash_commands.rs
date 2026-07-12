@@ -2247,12 +2247,16 @@ async fn slash_mcp_requests_inventory_via_app_server() {
 
     chat.dispatch_command(SlashCommand::Mcp);
 
-    assert!(active_blob(&chat).contains("Loading MCP inventory"));
+    insta::assert_snapshot!(
+        "mcp_manager_loading_popup",
+        render_bottom_popup(&chat, /*width*/ 80)
+    );
     assert_matches!(
         rx.try_recv(),
         Ok(AppEvent::FetchMcpInventory {
-            detail: McpServerStatusDetail::ToolsAndAuthOnly,
-            thread_id: Some(actual_thread_id)
+            detail: McpServerStatusDetail::Full,
+            thread_id: Some(actual_thread_id),
+            presentation: crate::app_event::McpInventoryPresentation::Manager,
         }) if actual_thread_id == thread_id
     );
     assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
@@ -2271,9 +2275,100 @@ async fn slash_mcp_verbose_requests_full_inventory_via_app_server() {
         rx.try_recv(),
         Ok(AppEvent::FetchMcpInventory {
             detail: McpServerStatusDetail::Full,
-            thread_id: Some(actual_thread_id)
+            thread_id: Some(actual_thread_id),
+            presentation: crate::app_event::McpInventoryPresentation::History,
         }) if actual_thread_id == thread_id
     );
+    assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
+async fn mcp_manager_shows_servers_and_starts_selected_oauth() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.open_mcp_manager();
+    let _ = rx.try_recv().expect("expected MCP inventory request");
+
+    let statuses = vec![
+        codex_app_server_protocol::McpServerStatus {
+            name: "docs".to_string(),
+            server_info: None,
+            tools: HashMap::new(),
+            resources: Vec::new(),
+            resource_templates: Vec::new(),
+            auth_status: codex_app_server_protocol::McpAuthStatus::OAuth,
+        },
+        codex_app_server_protocol::McpServerStatus {
+            name: "github".to_string(),
+            server_info: None,
+            tools: HashMap::new(),
+            resources: Vec::new(),
+            resource_templates: Vec::new(),
+            auth_status: codex_app_server_protocol::McpAuthStatus::NotLoggedIn,
+        },
+        codex_app_server_protocol::McpServerStatus {
+            name: "local-files".to_string(),
+            server_info: None,
+            tools: HashMap::new(),
+            resources: Vec::new(),
+            resource_templates: Vec::new(),
+            auth_status: codex_app_server_protocol::McpAuthStatus::Unsupported,
+        },
+        codex_app_server_protocol::McpServerStatus {
+            name: "sentry".to_string(),
+            server_info: None,
+            tools: HashMap::new(),
+            resources: Vec::new(),
+            resource_templates: Vec::new(),
+            auth_status: codex_app_server_protocol::McpAuthStatus::BearerToken,
+        },
+    ];
+
+    chat.on_mcp_manager_loaded(Ok(statuses.clone()));
+    insta::assert_snapshot!(
+        "mcp_manager_servers_popup",
+        render_bottom_popup(&chat, /*width*/ 80)
+    );
+
+    chat.open_mcp_server_actions(statuses[1].clone());
+    insta::assert_snapshot!(
+        "mcp_manager_oauth_actions_popup",
+        render_bottom_popup(&chat, /*width*/ 80)
+    );
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::StartMcpOauthLogin {
+            name,
+            thread_id: Some(actual_thread_id),
+        }) if name == "github" && actual_thread_id == thread_id
+    );
+    assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
+async fn mcp_oauth_completion_is_reported_in_history() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.on_mcp_oauth_login_completed(
+        codex_app_server_protocol::McpServerOauthLoginCompletedNotification {
+            name: "github".to_string(),
+            thread_id: None,
+            success: true,
+            error: None,
+        },
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    let rendered = cells
+        .iter()
+        .map(|cell| lines_to_single_string(cell))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("Authenticated MCP server 'github'."));
+    assert!(rendered.contains("Run /mcp to review its updated status and tools."));
     assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
 }
 

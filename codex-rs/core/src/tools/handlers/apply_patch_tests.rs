@@ -84,45 +84,19 @@ async fn post_tool_use_payload_uses_patch_input_and_tool_output() {
 }
 
 #[test]
-fn diff_consumer_streams_apply_patch_changes() {
+fn diff_consumer_publishes_apply_patch_once_when_complete() {
     let mut consumer = ApplyPatchArgumentDiffConsumer::default();
-    assert!(
-        consumer
-            .push_delta("call-1".to_string(), "*** Begin Patch\n")
-            .is_none()
-    );
+    consumer.push_delta("call-1".to_string(), "*** Begin Patch\n");
 
-    let event = consumer
-        .push_delta("call-1".to_string(), "*** Add File: hello.txt\n+hello")
-        .expect("progress event");
-    assert_eq!(
-        (event.call_id, event.changes),
-        (
-            "call-1".to_string(),
-            HashMap::from([(
-                PathBuf::from("hello.txt"),
-                FileChange::Add {
-                    content: String::new(),
-                },
-            )]),
-        )
-    );
+    consumer.push_delta("call-1".to_string(), "*** Add File: hello.txt\n+hello");
 
-    assert!(
-        consumer
-            .push_delta("call-1".to_string(), "\n+world")
-            .is_none()
-    );
-    assert!(
-        consumer
-            .push_delta("call-1".to_string(), "\n*** End Patch")
-            .is_none()
-    );
+    consumer.push_delta("call-1".to_string(), "\n+world");
+    consumer.push_delta("call-1".to_string(), "\n*** End Patch");
 
     let event = consumer
         .finish_update_on_complete()
         .expect("finish parser")
-        .expect("progress event");
+        .expect("completed event");
     assert_eq!(
         (event.call_id, event.changes),
         (
@@ -138,59 +112,48 @@ fn diff_consumer_streams_apply_patch_changes() {
 }
 
 #[test]
-fn diff_consumer_streams_apply_patch_changes_with_environment_header() {
+fn diff_consumer_accepts_environment_header_without_partial_update() {
     let mut consumer = ApplyPatchArgumentDiffConsumer::default();
-    assert!(
-        consumer
-            .push_delta(
-                "call-1".to_string(),
-                "*** Begin Patch\n*** Environment ID: remote\n",
-            )
-            .is_none()
+    consumer.push_delta(
+        "call-1".to_string(),
+        "*** Begin Patch\n*** Environment ID: remote\n",
     );
 
+    consumer.push_delta(
+        "call-1".to_string(),
+        "*** Add File: hello.txt\n+hello\n*** End Patch",
+    );
     let event = consumer
-        .push_delta("call-1".to_string(), "*** Add File: hello.txt\n+hello")
-        .expect("progress event");
+        .finish_update_on_complete()
+        .expect("finish parser")
+        .expect("completed event");
     assert_eq!(
         event.changes,
         HashMap::from([(
             PathBuf::from("hello.txt"),
             FileChange::Add {
-                content: String::new(),
+                content: "hello\n".to_string(),
             },
         )])
     );
 }
 
 #[test]
-fn diff_consumer_sends_next_update_after_buffer_interval() {
+fn diff_consumer_keeps_latest_snapshot_without_emitting_intermediate_updates() {
     let mut consumer = ApplyPatchArgumentDiffConsumer::default();
     consumer.push_delta("call-1".to_string(), "*** Begin Patch\n");
-    let first = consumer
-        .push_delta("call-1".to_string(), "*** Add File: hello.txt\n+hello")
-        .expect("first progress event");
+    consumer.push_delta("call-1".to_string(), "*** Add File: hello.txt\n+hello");
+    consumer.push_delta("call-1".to_string(), "\n+world\n*** End Patch");
+    let completed = consumer
+        .finish_update_on_complete()
+        .expect("finish parser")
+        .expect("completed event");
     assert_eq!(
-        first.changes,
+        completed.changes,
         HashMap::from([(
             PathBuf::from("hello.txt"),
             FileChange::Add {
-                content: String::new(),
-            },
-        )])
-    );
-
-    consumer.last_sent_at =
-        Some(std::time::Instant::now() - APPLY_PATCH_ARGUMENT_DIFF_BUFFER_INTERVAL);
-    let second = consumer
-        .push_delta("call-1".to_string(), "\n+world")
-        .expect("second progress event");
-    assert_eq!(
-        second.changes,
-        HashMap::from([(
-            PathBuf::from("hello.txt"),
-            FileChange::Add {
-                content: "hello\n".to_string(),
+                content: "hello\nworld\n".to_string(),
             },
         )])
     );

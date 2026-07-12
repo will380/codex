@@ -1158,7 +1158,7 @@ async fn apply_patch_cli_can_use_shell_command_output_as_patch_input() -> Result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn apply_patch_custom_tool_streaming_emits_updated_changes() -> Result<()> {
+async fn apply_patch_custom_tool_streaming_emits_one_completed_update() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let harness = apply_patch_harness_with(|builder| {
@@ -1232,22 +1232,12 @@ async fn apply_patch_custom_tool_streaming_emits_updated_changes() -> Result<()>
             .iter()
             .map(|update| update.call_id.as_str())
             .collect::<Vec<_>>(),
-        vec![call_id, call_id]
+        vec![call_id]
     );
     assert_eq!(
         updates
             .first()
-            .expect("first update")
-            .changes
-            .get(&std::path::PathBuf::from("streamed.txt")),
-        Some(&codex_protocol::protocol::FileChange::Add {
-            content: String::new(),
-        })
-    );
-    assert_eq!(
-        updates
-            .last()
-            .expect("last update")
+            .expect("completed update")
             .changes
             .get(&std::path::PathBuf::from("streamed.txt")),
         Some(&codex_protocol::protocol::FileChange::Add {

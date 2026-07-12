@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
 
 use crate::apply_patch;
 use crate::apply_patch::InternalApplyPatchInvocation;
@@ -54,7 +52,6 @@ use codex_tools::ToolSpec;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 
-const APPLY_PATCH_ARGUMENT_DIFF_BUFFER_INTERVAL: Duration = Duration::from_millis(500);
 /// Handles freeform `apply_patch` requests and routes verified patches to the
 /// selected environment filesystem.
 #[derive(Default)]
@@ -71,8 +68,7 @@ impl ApplyPatchHandler {
 #[derive(Default)]
 struct ApplyPatchArgumentDiffConsumer {
     parser: StreamingPatchParser,
-    last_sent_at: Option<Instant>,
-    pending: Option<PatchApplyUpdatedEvent>,
+    call_id: Option<String>,
 }
 
 impl ToolArgumentDiffConsumer for ApplyPatchArgumentDiffConsumer {
@@ -90,8 +86,8 @@ impl ToolArgumentDiffConsumer for ApplyPatchArgumentDiffConsumer {
             return None;
         }
 
-        self.push_delta(call_id, diff)
-            .map(EventMsg::PatchApplyUpdated)
+        self.push_delta(call_id, diff);
+        None
     }
 
     fn finish(&mut self) -> Result<Option<EventMsg>, FunctionCallError> {
@@ -101,41 +97,30 @@ impl ToolArgumentDiffConsumer for ApplyPatchArgumentDiffConsumer {
 }
 
 impl ApplyPatchArgumentDiffConsumer {
-    fn push_delta(&mut self, call_id: String, delta: &str) -> Option<PatchApplyUpdatedEvent> {
-        let hunks = self.parser.push_delta(delta).ok()?;
-        if hunks.is_empty() {
-            return None;
-        }
-        let changes = convert_apply_patch_hunks_to_protocol(&hunks);
-        let event = PatchApplyUpdatedEvent { call_id, changes };
-        let now = Instant::now();
-        match self.last_sent_at {
-            Some(last_sent_at)
-                if now.duration_since(last_sent_at) < APPLY_PATCH_ARGUMENT_DIFF_BUFFER_INTERVAL =>
-            {
-                self.pending = Some(event);
-                None
-            }
-            Some(_) | None => {
-                self.pending = None;
-                self.last_sent_at = Some(now);
-                Some(event)
-            }
-        }
+    fn push_delta(&mut self, call_id: String, delta: &str) {
+        self.call_id = Some(call_id);
+        // Parse incrementally so malformed patches still fail at completion, but deliberately do
+        // not publish partial UI snapshots. A file edit should appear as one settled transcript
+        // object instead of repainting once per streamed argument line.
+        let _ = self.parser.push_delta(delta);
     }
 
     fn finish_update_on_complete(
         &mut self,
     ) -> Result<Option<PatchApplyUpdatedEvent>, FunctionCallError> {
-        self.parser.finish().map_err(|err| {
+        let hunks = self.parser.finish().map_err(|err| {
             FunctionCallError::RespondToModel(format!("failed to parse apply_patch: {err}"))
         })?;
-
-        let event = self.pending.take();
-        if event.is_some() {
-            self.last_sent_at = Some(Instant::now());
+        if hunks.is_empty() {
+            return Ok(None);
         }
-        Ok(event)
+        let Some(call_id) = self.call_id.take() else {
+            return Ok(None);
+        };
+        Ok(Some(PatchApplyUpdatedEvent {
+            call_id,
+            changes: convert_apply_patch_hunks_to_protocol(&hunks),
+        }))
     }
 }
 

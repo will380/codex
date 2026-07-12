@@ -303,6 +303,7 @@ impl App {
     /// Open transcript overlay (enters alternate screen and shows full transcript).
     pub(crate) fn open_transcript_overlay(&mut self, tui: &mut tui::Tui) {
         self.mouse_scrollback_active = false;
+        self.mouse_scrollback_indicator_hovered = false;
         let _ = tui.enter_alt_screen();
         self.overlay = Some(Overlay::new_transcript(
             self.transcript_cells.clone(),
@@ -324,6 +325,7 @@ impl App {
         }
         self.overlay = None;
         self.mouse_scrollback_active = false;
+        self.mouse_scrollback_indicator_hovered = false;
         self.backtrack.overlay_preview_active = false;
         tui.frame_requester().schedule_frame();
         if was_backtrack {
@@ -354,14 +356,34 @@ impl App {
     ) -> Result<bool> {
         let viewport = tui.terminal.viewport_area;
         let composer_height = self.chat_widget.composer_surface_height(viewport.width);
-        let (_, indicator, composer) = anchored_scrollback_layout(viewport, composer_height);
+        let (_, indicator, _composer) = anchored_scrollback_layout(viewport, composer_height);
+        let pointer_is_over_indicator = matches!(
+            event,
+            TuiEvent::Mouse(MouseEvent { column, row, .. })
+                if column >= indicator.x
+                    && column < indicator.right()
+                    && row >= indicator.y
+                    && row < indicator.bottom()
+        );
+        if matches!(
+            event,
+            TuiEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                ..
+            })
+        ) {
+            if self.mouse_scrollback_indicator_hovered != pointer_is_over_indicator {
+                self.mouse_scrollback_indicator_hovered = pointer_is_over_indicator;
+                tui.frame_requester().schedule_frame();
+            }
+            return Ok(true);
+        }
         let jump_requested = matches!(
             event,
             TuiEvent::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
-                row,
                 ..
-            }) if row >= indicator.y && row < composer.bottom()
+            }) if pointer_is_over_indicator
         ) || matches!(
             event,
             TuiEvent::Key(KeyEvent {
@@ -520,6 +542,7 @@ impl App {
             let active_key = self.chat_widget.active_cell_transcript_key();
             let chat_widget = &self.chat_widget;
             let mouse_scrollback_active = self.mouse_scrollback_active;
+            let indicator_hovered = self.mouse_scrollback_indicator_hovered;
             tui.draw(u16::MAX, |frame| {
                 let width = frame.area().width.max(1);
                 t.sync_live_tail(width, active_key, |w| {
@@ -530,11 +553,16 @@ impl App {
                     let (transcript, indicator, composer) =
                         anchored_scrollback_layout(frame.area(), composer_height);
                     t.render_scrollback(transcript, frame.buffer);
-                    Paragraph::new(
-                        Line::from("↓ Jump to latest · click or press End").light_blue(),
-                    )
-                    .centered()
-                    .render(indicator, frame.buffer);
+                    let indicator_line =
+                        Line::from("↓ Jump to latest · click or press End").light_blue();
+                    let indicator_line = if indicator_hovered {
+                        indicator_line.reversed().bold()
+                    } else {
+                        indicator_line
+                    };
+                    Paragraph::new(indicator_line)
+                        .centered()
+                        .render(indicator, frame.buffer);
                     chat_widget.render_composer_surface(composer, frame.buffer);
                     if let Some((x, y)) = chat_widget.composer_surface_cursor_pos(composer) {
                         frame.set_cursor_style(chat_widget.composer_surface_cursor_style(composer));

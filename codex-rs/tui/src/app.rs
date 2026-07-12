@@ -524,6 +524,8 @@ pub(crate) struct App {
     pub(crate) overlay: Option<Overlay>,
     /// True when mouse-wheel transcript browsing is keeping the composer anchored on screen.
     pub(crate) mouse_scrollback_active: bool,
+    /// Whether the pointer is currently over the scrollback jump control.
+    pub(crate) mouse_scrollback_indicator_hovered: bool,
     pub(crate) deferred_history_lines: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
     has_emitted_history_lines: bool,
     transcript_reflow: TranscriptReflowState,
@@ -1036,6 +1038,7 @@ See the Codex keymap documentation for supported actions and examples."
             transcript_cells: Vec::new(),
             overlay: None,
             mouse_scrollback_active: false,
+            mouse_scrollback_indicator_hovered: false,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
             transcript_reflow: TranscriptReflowState::default(),

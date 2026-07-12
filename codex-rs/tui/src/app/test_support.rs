@@ -34,6 +34,7 @@ pub(super) async fn make_test_app() -> App {
         transcript_cells: Vec::new(),
         overlay: None,
         mouse_scrollback_active: false,
+        mouse_scrollback_indicator_hovered: false,
         deferred_history_lines: Vec::new(),
         has_emitted_history_lines: false,
         transcript_reflow: TranscriptReflowState::default(),

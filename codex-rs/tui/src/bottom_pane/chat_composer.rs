@@ -433,6 +433,31 @@ pub(crate) struct ComposerDraftSnapshot {
 
 const FOOTER_SPACING_HEIGHT: u16 = 1;
 
+fn render_rounded_background(area: Rect, buf: &mut Buffer, style: Style) {
+    if area.is_empty() {
+        return;
+    }
+    if area.width < 3 {
+        buf.set_style(area, style);
+        return;
+    }
+
+    let inset_row = Rect::new(area.x + 1, area.y, area.width - 2, 1);
+    buf.set_style(inset_row, style);
+    if area.height > 2 {
+        buf.set_style(
+            Rect::new(area.x, area.y + 1, area.width, area.height - 2),
+            style,
+        );
+    }
+    if area.height > 1 {
+        buf.set_style(
+            Rect::new(area.x + 1, area.bottom() - 1, area.width - 2, 1),
+            style,
+        );
+    }
+}
+
 /// Builds the one-line nudge that replaces the ambient footer without adding layout height.
 fn plan_mode_nudge_line() -> Line<'static> {
     Line::from(vec![
@@ -4459,11 +4484,11 @@ impl ChatComposer {
         } else {
             Style::default().dim()
         };
+        render_rounded_background(composer_rect, buf, style);
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(border_style)
-            .style(style)
             .render_ref(composer_rect, buf);
         if !remote_images_rect.is_empty() {
             Paragraph::new(self.attachments.remote_image_lines())
@@ -4643,6 +4668,21 @@ mod tests {
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(area.right() - 1, 0)].symbol(), "╮");
         assert_eq!(buf[(0, 0)].fg, Color::LightBlue);
+    }
+
+    #[test]
+    fn rounded_composer_background_matches_outline_height_without_square_corners() {
+        let area = Rect::new(0, 0, 8, 4);
+        let mut buf = Buffer::empty(area);
+        render_rounded_background(area, &mut buf, Style::default().bg(Color::DarkGray));
+
+        for corner in [(0, 0), (7, 0), (0, 3), (7, 3)] {
+            assert_eq!(buf[corner].bg, Color::Reset);
+        }
+        assert_eq!(buf[(1, 0)].bg, Color::DarkGray);
+        assert_eq!(buf[(0, 1)].bg, Color::DarkGray);
+        assert_eq!(buf[(7, 2)].bg, Color::DarkGray);
+        assert_eq!(buf[(6, 3)].bg, Color::DarkGray);
     }
 
     #[test]

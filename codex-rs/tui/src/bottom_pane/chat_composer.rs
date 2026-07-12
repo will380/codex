@@ -166,6 +166,8 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Block;
+use ratatui::widgets::BorderType;
+use ratatui::widgets::Borders;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::WidgetRef;
@@ -429,7 +431,7 @@ pub(crate) struct ComposerDraftSnapshot {
     pub(crate) pending_pastes: Vec<(String, String)>,
 }
 
-const FOOTER_SPACING_HEIGHT: u16 = 0;
+const FOOTER_SPACING_HEIGHT: u16 = 1;
 
 /// Builds the one-line nudge that replaces the ambient footer without adding layout height.
 fn plan_mode_nudge_line() -> Line<'static> {
@@ -4452,7 +4454,17 @@ impl ChatComposer {
             }
         }
         let style = user_message_style();
-        Block::default().style(style).render_ref(composer_rect, buf);
+        let border_style = if self.has_focus {
+            Style::default().fg(Color::LightBlue)
+        } else {
+            Style::default().dim()
+        };
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(border_style)
+            .style(style)
+            .render_ref(composer_rect, buf);
         if !remote_images_rect.is_empty() {
             Paragraph::new(self.attachments.remote_image_lines())
                 .style(style)
@@ -4619,6 +4631,18 @@ mod tests {
             "",
             "expected blank spacing row above hints but saw: {spacing_row:?}",
         );
+    }
+
+    #[test]
+    fn focused_composer_has_rounded_blue_outline() {
+        let (composer, _rx) = new_test_composer();
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+        composer.render(area, &mut buf);
+
+        assert_eq!(buf[(0, 0)].symbol(), "╭");
+        assert_eq!(buf[(area.right() - 1, 0)].symbol(), "╮");
+        assert_eq!(buf[(0, 0)].fg, Color::LightBlue);
     }
 
     #[test]

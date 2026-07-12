@@ -83,7 +83,15 @@ async fn empty_turn_environments_omits_environment_backed_tools() -> Result<()> 
         tools.contains(&"update_plan".to_string()),
         "non-environment tool should remain available; got {tools:?}"
     );
-    for environment_tool in ["exec_command", "write_stdin", "apply_patch", "view_image"] {
+    for environment_tool in [
+        "exec_command",
+        "write_stdin",
+        "apply_patch",
+        "read_file",
+        "write_file",
+        "update_file",
+        "view_image",
+    ] {
         assert!(
             !tools.contains(&environment_tool.to_string()),
             "{environment_tool} should be omitted for explicit empty turn environments; got {tools:?}"

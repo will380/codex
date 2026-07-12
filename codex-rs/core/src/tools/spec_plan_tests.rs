@@ -619,6 +619,9 @@ async fn environment_count_controls_environment_backed_tools() {
         "shell_command",
         "exec_command",
         "apply_patch",
+        "read_file",
+        "write_file",
+        "update_file",
         "view_image",
         "request_permissions",
     ]);
@@ -626,6 +629,9 @@ async fn environment_count_controls_environment_backed_tools() {
         "shell_command",
         "exec_command",
         "apply_patch",
+        "read_file",
+        "write_file",
+        "update_file",
         "view_image",
         "request_permissions",
     ]);
@@ -641,6 +647,9 @@ async fn environment_count_controls_environment_backed_tools() {
     multiple_environments.assert_visible_contains(&[
         "exec_command",
         "apply_patch",
+        "read_file",
+        "write_file",
+        "update_file",
         "view_image",
         "request_permissions",
     ]);
@@ -655,6 +664,12 @@ async fn environment_count_controls_environment_backed_tools() {
         multiple_environments.visible_spec("view_image"),
         "environment_id"
     ));
+    for tool in ["read_file", "write_file", "update_file"] {
+        assert!(has_parameter(
+            multiple_environments.visible_spec(tool),
+            "environment_id"
+        ));
+    }
 }
 
 #[tokio::test]
@@ -686,7 +701,14 @@ async fn environment_tools_follow_the_step_context() {
         &Default::default(),
     ));
 
-    plan.assert_visible_contains(&["exec_command", "apply_patch", "view_image"]);
+    plan.assert_visible_contains(&[
+        "exec_command",
+        "apply_patch",
+        "read_file",
+        "write_file",
+        "update_file",
+        "view_image",
+    ]);
 }
 
 #[tokio::test]

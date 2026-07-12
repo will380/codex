@@ -2476,6 +2476,92 @@ async fn unified_exec_keeps_long_running_session_after_turn_end() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unified_exec_wakes_idle_turn_with_batched_background_completions() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    skip_if_host_windows!(Ok(()));
+
+    let server = start_mock_server().await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config.use_experimental_unified_exec_tool = true;
+        config
+            .features
+            .enable(Feature::UnifiedExec)
+            .expect("test config should allow feature update");
+    });
+    let test = builder.build(&server).await?;
+
+    let first_call_id = "uexec-wake-first";
+    let first_args = json!({
+        "cmd": "sleep 0.5; printf 'FIRST-BACKGROUND-DONE'",
+        "yield_time_ms": 250,
+        "on_exit": "wake",
+    });
+    let second_call_id = "uexec-wake-second";
+    let second_args = json!({
+        "cmd": "sleep 0.75; printf 'SECOND-BACKGROUND-DONE'",
+        "yield_time_ms": 250,
+        "on_exit": "wake",
+    });
+
+    let responses = vec![
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_function_call(
+                first_call_id,
+                "exec_command",
+                &serde_json::to_string(&first_args)?,
+            ),
+            ev_function_call(
+                second_call_id,
+                "exec_command",
+                &serde_json::to_string(&second_args)?,
+            ),
+            ev_completed("resp-1"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-2"),
+            ev_assistant_message("msg-1", "waiting in the background"),
+            ev_completed("resp-2"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-3"),
+            ev_assistant_message("msg-2", "both background commands finished"),
+            ev_completed("resp-3"),
+        ]),
+    ];
+    let request_log = mount_sse_sequence(&server, responses).await;
+
+    submit_unified_exec_turn(
+        &test,
+        "start two background commands and wake when both finish",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 3);
+    let wake_request = &requests[2];
+    assert!(wake_request.body_contains_text("<exec_command_completion>"));
+    assert!(wake_request.body_contains_text(first_call_id));
+    assert!(wake_request.body_contains_text("FIRST-BACKGROUND-DONE"));
+    assert!(wake_request.body_contains_text(second_call_id));
+    assert!(wake_request.body_contains_text("SECOND-BACKGROUND-DONE"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_interrupt_preserves_long_running_session() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));

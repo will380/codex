@@ -45,10 +45,36 @@ use color_eyre::eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::MouseButton;
+use crossterm::event::MouseEvent;
+use crossterm::event::MouseEventKind;
+use ratatui::layout::Rect;
+use ratatui::style::Stylize;
+use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
+use ratatui::widgets::Widget;
 
 const NO_PREVIOUS_MESSAGE_TO_EDIT: &str = "No previous message to edit.";
 pub(crate) const SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE: &str =
     "Editing previous prompts is unavailable in side conversations.";
+
+fn anchored_scrollback_layout(area: Rect, desired_composer_height: u16) -> (Rect, Rect, Rect) {
+    let composer_height = desired_composer_height.min(area.height.saturating_sub(2));
+    let indicator_height = u16::from(area.height > composer_height);
+    let transcript_height = area
+        .height
+        .saturating_sub(composer_height)
+        .saturating_sub(indicator_height);
+    let transcript = Rect::new(area.x, area.y, area.width, transcript_height);
+    let indicator = Rect::new(
+        area.x,
+        area.y.saturating_add(transcript_height),
+        area.width,
+        indicator_height,
+    );
+    let composer = Rect::new(area.x, indicator.bottom(), area.width, composer_height);
+    (transcript, indicator, composer)
+}
 
 /// Aggregates all backtrack-related state used by the App.
 #[derive(Default)]
@@ -115,6 +141,9 @@ impl App {
         tui: &mut tui::Tui,
         event: TuiEvent,
     ) -> Result<bool> {
+        if self.mouse_scrollback_active {
+            return self.handle_mouse_scrollback_overlay_event(tui, event);
+        }
         if self.backtrack.overlay_preview_active {
             match event {
                 TuiEvent::Key(KeyEvent {
@@ -273,6 +302,7 @@ impl App {
 
     /// Open transcript overlay (enters alternate screen and shows full transcript).
     pub(crate) fn open_transcript_overlay(&mut self, tui: &mut tui::Tui) {
+        self.mouse_scrollback_active = false;
         let _ = tui.enter_alt_screen();
         self.overlay = Some(Overlay::new_transcript(
             self.transcript_cells.clone(),
@@ -293,12 +323,75 @@ impl App {
             );
         }
         self.overlay = None;
+        self.mouse_scrollback_active = false;
         self.backtrack.overlay_preview_active = false;
         tui.frame_requester().schedule_frame();
         if was_backtrack {
             // Ensure backtrack state is fully reset when overlay closes (e.g. via 'q').
             self.reset_backtrack_state();
         }
+    }
+
+    pub(crate) fn handle_mouse_event(
+        &mut self,
+        tui: &mut tui::Tui,
+        mouse_event: MouseEvent,
+    ) -> Result<()> {
+        if mouse_event.kind != MouseEventKind::ScrollUp {
+            return Ok(());
+        }
+
+        self.open_transcript_overlay(tui);
+        self.mouse_scrollback_active = true;
+        self.overlay_forward_event(tui, TuiEvent::Draw)?;
+        self.overlay_forward_event(tui, TuiEvent::Mouse(mouse_event))
+    }
+
+    fn handle_mouse_scrollback_overlay_event(
+        &mut self,
+        tui: &mut tui::Tui,
+        event: TuiEvent,
+    ) -> Result<bool> {
+        let viewport = tui.terminal.viewport_area;
+        let composer_height = self.chat_widget.composer_surface_height(viewport.width);
+        let (_, indicator, composer) = anchored_scrollback_layout(viewport, composer_height);
+        let jump_requested = matches!(
+            event,
+            TuiEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                row,
+                ..
+            }) if row >= indicator.y && row < composer.bottom()
+        ) || matches!(
+            event,
+            TuiEvent::Key(KeyEvent {
+                code: KeyCode::End,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            })
+        );
+        if jump_requested {
+            self.close_transcript_overlay(tui);
+            return Ok(true);
+        }
+
+        let scrolls_down = matches!(
+            event,
+            TuiEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                ..
+            })
+        );
+        self.overlay_forward_event(tui, event)?;
+        if scrolls_down
+            && self
+                .overlay
+                .as_ref()
+                .is_some_and(Overlay::is_scrolled_to_bottom)
+        {
+            self.close_transcript_overlay(tui);
+        }
+        Ok(true)
     }
 
     /// Initialize backtrack state and show composer hint.
@@ -426,12 +519,30 @@ impl App {
         {
             let active_key = self.chat_widget.active_cell_transcript_key();
             let chat_widget = &self.chat_widget;
+            let mouse_scrollback_active = self.mouse_scrollback_active;
             tui.draw(u16::MAX, |frame| {
                 let width = frame.area().width.max(1);
                 t.sync_live_tail(width, active_key, |w| {
                     chat_widget.active_cell_transcript_hyperlink_lines(w)
                 });
-                t.render(frame.area(), frame.buffer);
+                if mouse_scrollback_active {
+                    let composer_height = chat_widget.composer_surface_height(width);
+                    let (transcript, indicator, composer) =
+                        anchored_scrollback_layout(frame.area(), composer_height);
+                    t.render_scrollback(transcript, frame.buffer);
+                    Paragraph::new(
+                        Line::from("↓ Jump to latest · click or press End").light_blue(),
+                    )
+                    .centered()
+                    .render(indicator, frame.buffer);
+                    chat_widget.render_composer_surface(composer, frame.buffer);
+                    if let Some((x, y)) = chat_widget.composer_surface_cursor_pos(composer) {
+                        frame.set_cursor_style(chat_widget.composer_surface_cursor_style(composer));
+                        frame.set_cursor_position((x, y));
+                    }
+                } else {
+                    t.render(frame.area(), frame.buffer);
+                }
             })?;
             let close_overlay = t.is_done();
             if !close_overlay
@@ -754,6 +865,18 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn anchored_scrollback_keeps_indicator_directly_above_full_height_composer() {
+        let area = Rect::new(0, 0, 80, 30);
+        let (transcript, indicator, composer) = anchored_scrollback_layout(area, 6);
+
+        assert_eq!(transcript, Rect::new(0, 0, 80, 23));
+        assert_eq!(indicator, Rect::new(0, 23, 80, 1));
+        assert_eq!(composer, Rect::new(0, 24, 80, 6));
+        assert_eq!(indicator.bottom(), composer.y);
+        assert_eq!(composer.bottom(), area.bottom());
     }
 
     #[test]

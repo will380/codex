@@ -36,6 +36,7 @@ use crate::tui;
 use crate::tui::TuiEvent;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
+use crossterm::event::MouseEventKind;
 use ratatui::buffer::Buffer;
 use ratatui::buffer::Cell;
 use ratatui::layout::Rect;
@@ -87,6 +88,13 @@ impl Overlay {
         match self {
             Overlay::Transcript(o) => o.is_done(),
             Overlay::Static(o) => o.is_done(),
+        }
+    }
+
+    pub(crate) fn is_scrolled_to_bottom(&self) -> bool {
+        match self {
+            Overlay::Transcript(o) => o.is_scrolled_to_bottom(),
+            Overlay::Static(_) => false,
         }
     }
 }
@@ -289,6 +297,18 @@ impl PagerView {
         tui.frame_requester()
             .schedule_frame_in(crate::tui::TARGET_FRAME_INTERVAL);
         Ok(())
+    }
+
+    fn scroll_lines_up(&mut self, tui: &mut tui::Tui, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        tui.frame_requester()
+            .schedule_frame_in(crate::tui::TARGET_FRAME_INTERVAL);
+    }
+
+    fn scroll_lines_down(&mut self, tui: &mut tui::Tui, lines: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_add(lines);
+        tui.frame_requester()
+            .schedule_frame_in(crate::tui::TARGET_FRAME_INTERVAL);
     }
 
     /// Returns the height of one page in content rows.
@@ -777,6 +797,10 @@ impl TranscriptOverlay {
         self.view.render(top, buf);
         self.render_hints(bottom, buf);
     }
+
+    pub(crate) fn render_scrollback(&mut self, area: Rect, buf: &mut Buffer) {
+        self.view.render(area, buf);
+    }
 }
 
 impl TranscriptOverlay {
@@ -791,6 +815,14 @@ impl TranscriptOverlay {
                 }
                 other => self.view.handle_key_event(tui, other),
             },
+            TuiEvent::Mouse(mouse_event) => {
+                match mouse_event.kind {
+                    MouseEventKind::ScrollUp => self.view.scroll_lines_up(tui, 3),
+                    MouseEventKind::ScrollDown => self.view.scroll_lines_down(tui, 3),
+                    _ => {}
+                }
+                Ok(())
+            }
             TuiEvent::Draw | TuiEvent::Resize => {
                 tui.draw(u16::MAX, |frame| {
                     self.render(frame.area(), frame.buffer);

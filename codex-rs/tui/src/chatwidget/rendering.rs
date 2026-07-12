@@ -58,6 +58,34 @@ impl ChatWidget {
         );
         RenderableItem::Owned(Box::new(flex))
     }
+
+    pub(crate) fn composer_surface_height(&self, width: u16) -> u16 {
+        self.bottom_pane.desired_height_with_composer_right_reserve(
+            width,
+            self.ambient_pet_wrap_reserved_cols(),
+        )
+    }
+
+    pub(crate) fn render_composer_surface(&self, area: Rect, buf: &mut Buffer) {
+        self.bottom_pane.render_with_composer_right_reserve(
+            area,
+            buf,
+            self.ambient_pet_wrap_reserved_cols(),
+        );
+    }
+
+    pub(crate) fn composer_surface_cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        self.bottom_pane
+            .cursor_pos_with_composer_right_reserve(area, self.ambient_pet_wrap_reserved_cols())
+    }
+
+    pub(crate) fn composer_surface_cursor_style(
+        &self,
+        area: Rect,
+    ) -> crossterm::cursor::SetCursorStyle {
+        self.bottom_pane
+            .cursor_style_with_composer_right_reserve(area, self.ambient_pet_wrap_reserved_cols())
+    }
 }
 
 struct BottomPaneComposerReserveRenderable<'a> {

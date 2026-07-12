@@ -515,7 +515,7 @@ fn viewed_image_path_is_a_local_file_hyperlink() {
 }
 
 #[test]
-fn large_patch_is_collapsed_with_an_inspect_affordance() {
+fn large_patch_shows_a_compact_preview_and_omitted_line_count() {
     let cwd = test_path_buf("/tmp/project");
     let cell = new_patch_event(
         HashMap::from([(
@@ -527,11 +527,15 @@ fn large_patch_is_collapsed_with_an_inspect_affordance() {
         &cwd,
     );
 
+    let lines = render_lines(&cell.display_lines(/*width*/ 80));
+    assert_eq!(lines.len(), 8);
+    assert!(lines.iter().any(|line| line.contains("line 0")));
     assert!(
-        render_lines(&cell.display_lines(/*width*/ 80))
-            .iter()
-            .any(|line| line.contains("Click to inspect full diff"))
+        lines
+            .last()
+            .is_some_and(|line| line.contains("… +19 lines"))
     );
+    assert!(!lines.iter().any(|line| line.contains("Click to inspect")));
     assert!(cell.has_transcript_interaction());
 }
 

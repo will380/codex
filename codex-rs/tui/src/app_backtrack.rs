@@ -314,6 +314,40 @@ impl App {
         tui.frame_requester().schedule_frame();
     }
 
+    fn open_mouse_scrollback_overlay(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        self.mouse_scrollback_active = true;
+        self.mouse_scrollback_indicator_hovered = false;
+        self.overlay = Some(Overlay::new_mouse_scrollback(
+            self.transcript_cells.clone(),
+            self.keymap.pager.clone(),
+        ));
+
+        let active_key = self.chat_widget.active_cell_transcript_key();
+        let chat_widget = &self.chat_widget;
+        let Some(Overlay::Transcript(transcript)) = &mut self.overlay else {
+            return Ok(());
+        };
+        tui.enter_alt_screen_and_draw(|frame| {
+            let width = frame.area().width.max(1);
+            transcript.sync_live_tail(width, active_key, |w| {
+                chat_widget.active_cell_display_hyperlink_lines(w)
+            });
+            let composer_height = chat_widget.composer_surface_height(width);
+            let (history, indicator, composer) =
+                anchored_scrollback_layout(frame.area(), composer_height);
+            transcript.render_scrollback(history, frame.buffer);
+            Paragraph::new(Line::from("↓ Jump to latest · click or press End").light_blue())
+                .centered()
+                .render(indicator, frame.buffer);
+            chat_widget.render_composer_surface(composer, frame.buffer);
+            if let Some((x, y)) = chat_widget.composer_surface_cursor_pos(composer) {
+                frame.set_cursor_style(chat_widget.composer_surface_cursor_style(composer));
+                frame.set_cursor_position((x, y));
+            }
+        })?;
+        Ok(())
+    }
+
     /// Close transcript overlay and restore normal UI.
     pub(crate) fn close_transcript_overlay(&mut self, tui: &mut tui::Tui) {
         let _ = tui.leave_alt_screen();
@@ -345,9 +379,7 @@ impl App {
             return Ok(());
         }
 
-        self.open_transcript_overlay(tui);
-        self.mouse_scrollback_active = true;
-        self.overlay_forward_event(tui, TuiEvent::Draw)?;
+        self.open_mouse_scrollback_overlay(tui)?;
         self.overlay_forward_event(tui, TuiEvent::Mouse(mouse_event))
     }
 
@@ -397,6 +429,34 @@ impl App {
         );
         if jump_requested {
             self.close_transcript_overlay(tui);
+            return Ok(true);
+        }
+
+        if let TuiEvent::Key(key_event) = &event {
+            let key_event = *key_event;
+            let had_draft = !self.chat_widget.composer_is_empty();
+            self.chat_widget.handle_key_event(key_event);
+            let submitted = had_draft
+                && self.chat_widget.composer_is_empty()
+                && matches!(
+                    key_event,
+                    KeyEvent {
+                        code: KeyCode::Enter,
+                        kind: KeyEventKind::Press,
+                        ..
+                    }
+                );
+            if submitted {
+                self.close_transcript_overlay(tui);
+            } else {
+                tui.frame_requester().schedule_frame();
+            }
+            return Ok(true);
+        }
+
+        if let TuiEvent::Paste(pasted) = &event {
+            self.chat_widget.handle_paste(pasted.replace('\r', "\n"));
+            tui.frame_requester().schedule_frame();
             return Ok(true);
         }
 
@@ -549,7 +609,11 @@ impl App {
             tui.draw(u16::MAX, |frame| {
                 let width = frame.area().width.max(1);
                 t.sync_live_tail(width, active_key, |w| {
-                    chat_widget.active_cell_transcript_hyperlink_lines(w)
+                    if mouse_scrollback_active {
+                        chat_widget.active_cell_display_hyperlink_lines(w)
+                    } else {
+                        chat_widget.active_cell_transcript_hyperlink_lines(w)
+                    }
                 });
                 if mouse_scrollback_active {
                     let composer_height = chat_widget.composer_surface_height(width);

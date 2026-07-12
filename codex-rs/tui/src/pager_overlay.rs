@@ -63,6 +63,17 @@ impl Overlay {
         Self::Transcript(TranscriptOverlay::new(cells, keymap))
     }
 
+    pub(crate) fn new_mouse_scrollback(
+        cells: Vec<Arc<dyn HistoryCell>>,
+        keymap: PagerKeymap,
+    ) -> Self {
+        Self::Transcript(TranscriptOverlay::new_with_presentation(
+            cells,
+            keymap,
+            TranscriptPresentation::Display,
+        ))
+    }
+
     pub(crate) fn new_static_with_lines(
         lines: Vec<Line<'static>>,
         title: String,
@@ -513,11 +524,15 @@ impl Renderable for CachedRenderable {
 struct CellRenderable {
     cell: Arc<dyn HistoryCell>,
     style: Style,
+    presentation: TranscriptPresentation,
 }
 
 impl Renderable for CellRenderable {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let hyperlink_lines = self.cell.transcript_hyperlink_lines(area.width);
+        let hyperlink_lines = match self.presentation {
+            TranscriptPresentation::Detailed => self.cell.transcript_hyperlink_lines(area.width),
+            TranscriptPresentation::Display => self.cell.display_hyperlink_lines(area.width),
+        };
         let p = Paragraph::new(Text::from(visible_lines(hyperlink_lines.clone())))
             .style(self.style)
             .wrap(Wrap { trim: false });
@@ -526,7 +541,10 @@ impl Renderable for CellRenderable {
     }
 
     fn desired_height(&self, width: u16) -> u16 {
-        self.cell.desired_transcript_height(width)
+        match self.presentation {
+            TranscriptPresentation::Detailed => self.cell.desired_transcript_height(width),
+            TranscriptPresentation::Display => self.cell.desired_height(width),
+        }
     }
 }
 
@@ -562,9 +580,16 @@ pub(crate) struct TranscriptOverlay {
     highlight_cell: Option<usize>,
     hovered_cell: Option<usize>,
     pending_interaction: Option<HistoryCellInteraction>,
+    presentation: TranscriptPresentation,
     /// Cache key for the render-only live tail appended after committed cells.
     live_tail_key: Option<LiveTailKey>,
     is_done: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TranscriptPresentation {
+    Detailed,
+    Display,
 }
 
 /// Cache key for the active-cell "live tail" appended to the transcript overlay.
@@ -588,12 +613,21 @@ impl TranscriptOverlay {
     /// This overlay does not own the "active cell"; callers may optionally append a live tail via
     /// `sync_live_tail` during draws to reflect in-flight activity.
     pub(crate) fn new(transcript_cells: Vec<Arc<dyn HistoryCell>>, keymap: PagerKeymap) -> Self {
+        Self::new_with_presentation(transcript_cells, keymap, TranscriptPresentation::Detailed)
+    }
+
+    fn new_with_presentation(
+        transcript_cells: Vec<Arc<dyn HistoryCell>>,
+        keymap: PagerKeymap,
+        presentation: TranscriptPresentation,
+    ) -> Self {
         Self {
             view: PagerView::new(
                 Self::render_cells(
                     &transcript_cells,
                     /*highlight_cell*/ None,
                     /*hovered_cell*/ None,
+                    presentation,
                 ),
                 "T R A N S C R I P T".to_string(),
                 usize::MAX,
@@ -603,6 +637,7 @@ impl TranscriptOverlay {
             highlight_cell: None,
             hovered_cell: None,
             pending_interaction: None,
+            presentation,
             live_tail_key: None,
             is_done: false,
         }
@@ -612,6 +647,7 @@ impl TranscriptOverlay {
         cells: &[Arc<dyn HistoryCell>],
         highlight_cell: Option<usize>,
         hovered_cell: Option<usize>,
+        presentation: TranscriptPresentation,
     ) -> Vec<Box<dyn Renderable>> {
         cells
             .iter()
@@ -622,6 +658,7 @@ impl TranscriptOverlay {
                 let mut cell_renderable = if c.as_any().is::<UserHistoryCell>() {
                     Box::new(CachedRenderable::new(CellRenderable {
                         cell: c.clone(),
+                        presentation,
                         style: if highlight_cell == Some(i) {
                             user_message_style().reversed()
                         } else if hovered {
@@ -633,6 +670,7 @@ impl TranscriptOverlay {
                 } else {
                     Box::new(CachedRenderable::new(CellRenderable {
                         cell: c.clone(),
+                        presentation,
                         style: if hovered {
                             Style::default().reversed().bold()
                         } else {
@@ -673,6 +711,7 @@ impl TranscriptOverlay {
             &self.cells,
             self.highlight_cell,
             self.hovered_cell,
+            self.presentation,
         ));
         if let Some(tail) = tail_renderable {
             let tail = if !had_prior_cells
@@ -831,6 +870,7 @@ impl TranscriptOverlay {
             &self.cells,
             self.highlight_cell,
             self.hovered_cell,
+            self.presentation,
         ));
         if let Some(tail) = tail_renderable {
             self.view.push_renderable(tail);
@@ -1138,6 +1178,7 @@ mod tests {
     use codex_protocol::parse_command::ParsedCommand;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
     use ratatui::text::Text;
 
     #[derive(Debug)]
@@ -1156,6 +1197,23 @@ mod tests {
 
         fn transcript_lines(&self, _width: u16) -> Vec<Line<'static>> {
             self.lines.clone()
+        }
+    }
+
+    #[derive(Debug)]
+    struct DivergentTestCell;
+
+    impl HistoryCell for DivergentTestCell {
+        fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+            vec!["condensed rich view".green().into()]
+        }
+
+        fn transcript_lines(&self, _width: u16) -> Vec<Line<'static>> {
+            vec!["expanded raw transcript".into()]
+        }
+
+        fn raw_lines(&self) -> Vec<Line<'static>> {
+            self.transcript_lines(u16::MAX)
         }
     }
 
@@ -1294,6 +1352,25 @@ mod tests {
         assert!(rendered.contains("history line"));
         assert!(!rendered.contains("T R A N S C R I P T"));
         assert!(!rendered.contains("100%"));
+    }
+
+    #[test]
+    fn mouse_scrollback_preserves_condensed_rich_cell_presentation() {
+        let Overlay::Transcript(mut overlay) = Overlay::new_mouse_scrollback(
+            vec![Arc::new(DivergentTestCell)],
+            default_pager_keymap(),
+        ) else {
+            panic!("expected transcript overlay");
+        };
+        let area = Rect::new(0, 0, 80, 8);
+        let mut buf = Buffer::empty(area);
+
+        overlay.render_scrollback(area, &mut buf);
+
+        let rendered = buffer_to_text(&buf, area);
+        assert!(rendered.contains("condensed rich view"));
+        assert!(!rendered.contains("expanded raw transcript"));
+        assert_eq!(buf[(0, 0)].fg, Color::Green);
     }
 
     #[test]

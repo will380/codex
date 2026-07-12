@@ -224,7 +224,6 @@ use crate::render::Insets;
 use crate::render::RectExt;
 use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
-use crate::style::user_message_style;
 use codex_protocol::ThreadId;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
@@ -432,19 +431,6 @@ pub(crate) struct ComposerDraftSnapshot {
 }
 
 const FOOTER_SPACING_HEIGHT: u16 = 1;
-
-fn render_rounded_background(area: Rect, buf: &mut Buffer, style: Style) {
-    if area.width <= 2 || area.height <= 2 {
-        return;
-    }
-
-    // Terminal backgrounds always fill the entire cell. Keep the fill strictly inside the
-    // border so the top and bottom rows do not reveal a square surface behind rounded glyphs.
-    buf.set_style(
-        Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2),
-        style,
-    );
-}
 
 /// Builds the one-line nudge that replaces the ambient footer without adding layout height.
 fn plan_mode_nudge_line() -> Line<'static> {
@@ -4262,9 +4248,9 @@ impl ChatComposer {
                     custom_height.unwrap_or_else(|| footer_height(&footer_props));
                 let footer_spacing = Self::footer_spacing(footer_hint_height);
                 let hint_rect = if footer_spacing > 0 && footer_hint_height > 0 {
-                    let [_, hint_rect] = Layout::vertical([
-                        Constraint::Length(footer_spacing),
+                    let [hint_rect, _] = Layout::vertical([
                         Constraint::Length(footer_hint_height),
+                        Constraint::Length(footer_spacing),
                     ])
                     .areas(popup_rect);
                     hint_rect
@@ -4466,13 +4452,15 @@ impl ChatComposer {
                 }
             }
         }
-        let style = user_message_style();
+        // A terminal background always fills rectangular cells, so combining one with rounded
+        // border glyphs creates a visibly square inner slab. Keep the composer as one coherent
+        // outlined surface and let the terminal background show through.
+        let style = Style::default();
         let border_style = if self.has_focus {
             Style::default().fg(Color::LightBlue)
         } else {
             Style::default().dim()
         };
-        render_rounded_background(composer_rect, buf, style);
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -4593,7 +4581,7 @@ mod tests {
     }
 
     #[test]
-    fn footer_hint_row_is_separated_from_composer() {
+    fn footer_hint_row_is_balanced_with_bottom_padding() {
         let (tx, _rx) = unbounded_channel::<AppEvent>();
         let sender = AppEventSender::new(tx);
         let composer = ChatComposer::new(
@@ -4629,20 +4617,15 @@ mod tests {
             hint_row.expect("expected footer hint row to be rendered");
         assert_eq!(
             hint_row_idx,
-            area.height - 1,
-            "hint row should occupy the bottom line: {hint_row_contents:?}",
+            area.height - 2,
+            "hint row should sit directly below the composer: {hint_row_contents:?}",
         );
 
-        assert!(
-            hint_row_idx > 0,
-            "expected a spacing row above the footer hints",
-        );
-
-        let spacing_row = row_to_string(hint_row_idx - 1);
+        let spacing_row = row_to_string(hint_row_idx + 1);
         assert_eq!(
             spacing_row.trim(),
             "",
-            "expected blank spacing row above hints but saw: {spacing_row:?}",
+            "expected bottom padding below hints but saw: {spacing_row:?}",
         );
     }
 
@@ -4656,30 +4639,7 @@ mod tests {
         assert_eq!(buf[(0, 0)].symbol(), "╭");
         assert_eq!(buf[(area.right() - 1, 0)].symbol(), "╮");
         assert_eq!(buf[(0, 0)].fg, Color::LightBlue);
-    }
-
-    #[test]
-    fn rounded_composer_background_matches_outline_height_without_square_corners() {
-        let area = Rect::new(0, 0, 8, 4);
-        let mut buf = Buffer::empty(area);
-        render_rounded_background(area, &mut buf, Style::default().bg(Color::DarkGray));
-
-        for corner in [(0, 0), (7, 0), (0, 3), (7, 3)] {
-            assert_eq!(buf[corner].bg, Color::Reset);
-        }
-        for x in 0..area.width {
-            assert_eq!(buf[(x, 0)].bg, Color::Reset);
-            assert_eq!(buf[(x, area.height - 1)].bg, Color::Reset);
-        }
-        for y in 0..area.height {
-            assert_eq!(buf[(0, y)].bg, Color::Reset);
-            assert_eq!(buf[(area.width - 1, y)].bg, Color::Reset);
-        }
-        for y in 1..area.height - 1 {
-            for x in 1..area.width - 1 {
-                assert_eq!(buf[(x, y)].bg, Color::DarkGray);
-            }
-        }
+        assert_eq!(buf[(1, 1)].bg, Color::Reset);
     }
 
     #[test]
@@ -4700,10 +4660,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         composer.render(area, &mut buf);
 
-        let mut bottom_row = String::new();
+        let mut footer_row = String::new();
         for x in 0..area.width {
-            bottom_row.push(
-                buf[(x, area.height - 1)]
+            footer_row.push(
+                buf[(x, area.height - 2)]
                     .symbol()
                     .chars()
                     .next()
@@ -4711,12 +4671,12 @@ mod tests {
             );
         }
         assert!(
-            bottom_row.contains("FLASH"),
-            "expected flash content to render in footer row, saw: {bottom_row:?}",
+            footer_row.contains("FLASH"),
+            "expected flash content to render in footer row, saw: {footer_row:?}",
         );
         assert!(
-            !bottom_row.contains("K label"),
-            "expected flash to override hint override, saw: {bottom_row:?}",
+            !footer_row.contains("K label"),
+            "expected flash to override hint override, saw: {footer_row:?}",
         );
     }
 
@@ -4740,10 +4700,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         composer.render(area, &mut buf);
 
-        let mut bottom_row = String::new();
+        let mut footer_row = String::new();
         for x in 0..area.width {
-            bottom_row.push(
-                buf[(x, area.height - 1)]
+            footer_row.push(
+                buf[(x, area.height - 2)]
                     .symbol()
                     .chars()
                     .next()
@@ -4751,12 +4711,12 @@ mod tests {
             );
         }
         assert!(
-            bottom_row.contains("K label"),
-            "expected hint override to render after flash expired, saw: {bottom_row:?}",
+            footer_row.contains("K label"),
+            "expected hint override to render after flash expired, saw: {footer_row:?}",
         );
         assert!(
-            !bottom_row.contains("FLASH"),
-            "expected expired flash to be hidden, saw: {bottom_row:?}",
+            !footer_row.contains("FLASH"),
+            "expected expired flash to be hidden, saw: {footer_row:?}",
         );
     }
 
@@ -4989,7 +4949,7 @@ mod tests {
         assert_eq!(prompt_cell.symbol(), "!");
         assert_eq!(prompt_cell.style().fg, Some(Color::LightRed));
 
-        let footer_y = area.height - 1;
+        let footer_y = area.height - 2;
         let footer_text = (0..area.width)
             .map(|x| buf[(x, footer_y)].symbol().chars().next().unwrap_or(' '))
             .collect::<String>();

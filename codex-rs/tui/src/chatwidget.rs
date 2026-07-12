@@ -1989,6 +1989,41 @@ impl ChatWidget {
         (!lines.is_empty()).then_some(lines)
     }
 
+    /// Returns the active cell exactly as it appears in the main conversation viewport.
+    /// Mouse scrollback uses this condensed, styled representation so entering history does not
+    /// suddenly expand command output or replace live-view formatting with raw transcript lines.
+    pub(crate) fn active_cell_display_hyperlink_lines(
+        &self,
+        width: u16,
+    ) -> Option<Vec<HyperlinkLine>> {
+        let mut lines = Vec::new();
+        if let Some(cell) = self.transcript.active_cell.as_ref() {
+            lines.extend(cell.display_hyperlink_lines(width));
+        }
+        if let Some(hook_cell) = self.active_hook_cell.as_ref() {
+            let hook_lines = hook_cell.display_hyperlink_lines(width);
+            if !hook_lines.is_empty() && !lines.is_empty() {
+                lines.push(HyperlinkLine::from(""));
+            }
+            lines.extend(hook_lines);
+        }
+        if let Some(token_activity_cell) = self.pending_token_activity_output() {
+            let token_activity_lines = token_activity_cell.display_hyperlink_lines(width);
+            if !token_activity_lines.is_empty() && !lines.is_empty() {
+                lines.push(HyperlinkLine::from(""));
+            }
+            lines.extend(token_activity_lines);
+        }
+        if let Some(rate_limit_reset_hint) = self.pending_rate_limit_reset_hint() {
+            let hint_lines = rate_limit_reset_hint.display_hyperlink_lines(width);
+            if !hint_lines.is_empty() && !lines.is_empty() {
+                lines.push(HyperlinkLine::from(""));
+            }
+            lines.extend(hint_lines);
+        }
+        (!lines.is_empty()).then_some(lines)
+    }
+
     #[cfg(test)]
     pub(crate) fn active_cell_transcript_lines(&self, width: u16) -> Option<Vec<Line<'static>>> {
         self.active_cell_transcript_hyperlink_lines(width)

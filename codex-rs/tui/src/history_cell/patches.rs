@@ -11,14 +11,11 @@ pub(crate) struct PatchHistoryCell {
 
 impl HistoryCell for PatchHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let mut lines = create_diff_summary(&self.changes, &self.cwd, width as usize);
-        if is_large_patch(&self.changes) {
-            lines.push(Line::from(vec![
-                "  └ ".dim(),
-                "Click to inspect full diff".light_blue().underlined(),
-            ]));
-        }
-        lines
+        compact_diff_preview(create_diff_summary(
+            &self.changes,
+            &self.cwd,
+            width as usize,
+        ))
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
@@ -155,22 +152,16 @@ fn file_url(path: &Path) -> Option<String> {
     Url::from_file_path(path).ok().map(|url| url.to_string())
 }
 
-fn is_large_patch(changes: &HashMap<PathBuf, FileChange>) -> bool {
-    const COLLAPSED_DIFF_LINE_THRESHOLD: usize = 20;
-    let changed_lines = changes
-        .values()
-        .map(|change| match change {
-            FileChange::Add { content } | FileChange::Delete { content } => content.lines().count(),
-            FileChange::Update { unified_diff, .. } => unified_diff
-                .lines()
-                .filter(|line| {
-                    (line.starts_with('+') && !line.starts_with("+++"))
-                        || (line.starts_with('-') && !line.starts_with("---"))
-                })
-                .count(),
-        })
-        .sum::<usize>();
-    changes.len() > 1 || changed_lines >= COLLAPSED_DIFF_LINE_THRESHOLD
+fn compact_diff_preview(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    const MAX_VISIBLE_DIFF_LINES: usize = 7;
+    if lines.len() <= MAX_VISIBLE_DIFF_LINES {
+        return lines;
+    }
+
+    let omitted = lines.len() - MAX_VISIBLE_DIFF_LINES;
+    lines.truncate(MAX_VISIBLE_DIFF_LINES);
+    lines.push(Line::from(format!("    … +{omitted} lines").dim()));
+    lines
 }
 
 fn annotate_changed_file_paths(

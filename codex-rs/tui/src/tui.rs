@@ -740,6 +740,10 @@ impl Tui {
     /// Enter alternate screen and expand the viewport to full terminal size, saving the current
     /// inline viewport for restoration when leaving.
     pub fn enter_alt_screen(&mut self) -> Result<()> {
+        self.enter_alt_screen_inner()
+    }
+
+    fn enter_alt_screen_inner(&mut self) -> Result<()> {
         if !self.alt_screen_enabled {
             return Ok(());
         }
@@ -758,6 +762,25 @@ impl Tui {
         }
         self.alt_screen_active.store(true, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Enter alternate screen and paint its first frame as one synchronized terminal update.
+    ///
+    /// Entering the alternate buffer exposes a cleared screen immediately. Keeping the buffer
+    /// switch, clear, and first draw inside DECSYNC prevents a one-frame black flash when mouse
+    /// scrolling first promotes inline history into the managed transcript view.
+    pub fn enter_alt_screen_and_draw(
+        &mut self,
+        draw_fn: impl FnOnce(&mut custom_terminal::Frame),
+    ) -> Result<()> {
+        if !self.alt_screen_enabled {
+            return self.draw(u16::MAX, draw_fn);
+        }
+        ensure_virtual_terminal_processing()?;
+        stdout().sync_update(|_| {
+            self.enter_alt_screen_inner()?;
+            self.terminal.draw(draw_fn)
+        })?
     }
 
     /// Leave alternate screen and restore the previously saved inline viewport, if any.

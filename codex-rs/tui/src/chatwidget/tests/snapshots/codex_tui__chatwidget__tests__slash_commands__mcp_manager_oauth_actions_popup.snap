@@ -1,14 +1,13 @@
 ---
 source: tui/src/chatwidget/tests/slash_commands.rs
-assertion_line: 2335
 expression: "render_bottom_popup(&chat, 80)"
 ---
   MCP server
   github
   Authentication: Sign-in required
 
-› 1. Authenticate with OAuth   Codex will open your browser and report when
-                               authentication finishes.
+› 1. Authenticate with OAuth   This panel will track browser sign-in and
+                               verify completion.
   2. View tools and resources  0 tools · 0 resources · 0 templates
 
   Press enter to confirm or esc to go back

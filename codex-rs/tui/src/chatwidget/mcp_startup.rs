@@ -207,6 +207,7 @@ impl ChatWidget {
             self.restore_reasoning_status_header();
         }
         self.maybe_send_next_queued_input();
+        self.refresh_mcp_manager();
         self.request_redraw();
     }
 

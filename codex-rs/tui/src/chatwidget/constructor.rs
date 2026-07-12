@@ -163,6 +163,7 @@ impl ChatWidget {
             mcp_startup_allow_terminal_only_next_round: false,
             mcp_startup_pending_next_round: HashMap::new(),
             mcp_startup_pending_next_round_saw_starting: false,
+            mcp_manager_state: mcp_management::McpManagerState::default(),
             connectors: ConnectorsState::default(),
             ide_context: IdeContextState::default(),
             plugins_cache: PluginsCacheState::default(),

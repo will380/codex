@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/slash_commands.rs
+expression: "render_bottom_popup(&chat, 80)"
+---
+  MCP servers
+  Select a server to inspect tools or manage authentication.
+
+  Type to search MCP servers
+› No MCP servers configured  Add a server to config.toml, then restart Codex.
+
+  Press enter to confirm or esc to go back

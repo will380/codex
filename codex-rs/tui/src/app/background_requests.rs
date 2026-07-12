@@ -101,22 +101,15 @@ impl App {
         match result {
             Ok(url) => {
                 if let Err(err) = webbrowser::open(&url) {
-                    self.chat_widget.add_error_message(format!(
-                        "Failed to open browser for MCP server '{name}': {err}"
-                    ));
+                    self.chat_widget
+                        .on_mcp_oauth_browser_opened(&name, Err(err.to_string()));
                 } else {
-                    self.chat_widget.add_info_message(
-                        format!("Opened browser to authenticate MCP server '{name}'."),
-                        Some(
-                            "Complete sign-in in your browser; Codex will report when it finishes."
-                                .to_string(),
-                        ),
-                    );
+                    self.chat_widget.on_mcp_oauth_browser_opened(&name, Ok(()));
                 }
             }
-            Err(err) => self.chat_widget.add_error_message(format!(
-                "Failed to start OAuth for MCP server '{name}': {err}"
-            )),
+            Err(err) => self
+                .chat_widget
+                .on_mcp_oauth_browser_opened(&name, Err(err)),
         }
     }
 

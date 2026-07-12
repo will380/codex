@@ -608,6 +608,7 @@ pub(crate) struct ChatWidget {
     mcp_startup_pending_next_round: HashMap<String, McpStartupStatus>,
     /// Tracks whether the buffered next round has seen any `Starting` update yet.
     mcp_startup_pending_next_round_saw_starting: bool,
+    mcp_manager_state: mcp_management::McpManagerState,
     connectors: ConnectorsState,
     ide_context: IdeContextState,
     plugins_cache: PluginsCacheState,

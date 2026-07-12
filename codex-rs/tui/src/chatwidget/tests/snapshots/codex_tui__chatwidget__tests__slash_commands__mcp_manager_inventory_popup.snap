@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/slash_commands.rs
+expression: "render_bottom_popup(&chat, 80)"
+---
+  github inventory
+  Tools, resources, and templates
+
+  Search this server's inventory
+› No tools or resources available  Authenticate first if this server requires
+                                   sign-in.
+
+  Press enter to confirm or esc to go back

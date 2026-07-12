@@ -133,6 +133,13 @@ impl ChatWidget {
         }
         self.transcript.saw_copy_source_this_turn = false;
         self.refresh_skills_for_current_cwd(/*force_reload*/ true);
+        if self
+            .mcp_startup_expected_servers
+            .as_ref()
+            .is_none_or(HashSet::is_empty)
+        {
+            self.prefetch_mcp_manager();
+        }
         if self.connectors_enabled() {
             self.prefetch_connectors();
         }

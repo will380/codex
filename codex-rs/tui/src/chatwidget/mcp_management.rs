@@ -104,7 +104,7 @@ impl ChatWidget {
         let params = self.mcp_manager_result_params(result);
         let _ = self
             .bottom_pane
-            .replace_selection_view_if_active(MCP_MANAGER_VIEW_ID, params);
+            .replace_selection_view_if_present(MCP_MANAGER_VIEW_ID, params);
         self.refresh_active_mcp_server_actions();
         self.request_redraw();
     }

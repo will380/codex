@@ -2378,6 +2378,34 @@ async fn mcp_oauth_completion_refreshes_manager_without_history() {
 }
 
 #[tokio::test]
+async fn mcp_oauth_inventory_refresh_updates_parent_manager_view() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.open_mcp_manager();
+    let _ = rx.try_recv().expect("expected MCP inventory request");
+
+    let mut status = codex_app_server_protocol::McpServerStatus {
+        name: "github".to_string(),
+        server_info: None,
+        tools: HashMap::new(),
+        resources: Vec::new(),
+        resource_templates: Vec::new(),
+        auth_status: codex_app_server_protocol::McpAuthStatus::NotLoggedIn,
+    };
+    chat.on_mcp_manager_loaded(Ok(vec![status.clone()]));
+    chat.open_mcp_server_actions(status.clone());
+
+    status.auth_status = codex_app_server_protocol::McpAuthStatus::OAuth;
+    chat.on_mcp_manager_loaded(Ok(vec![status]));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
+
+    assert!(
+        render_bottom_popup(&chat, /*width*/ 80).contains("OAuth connected"),
+        "returning to the manager should show the refreshed authentication status"
+    );
+    assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
+}
+
+#[tokio::test]
 async fn slash_mcp_invalid_args_show_usage() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

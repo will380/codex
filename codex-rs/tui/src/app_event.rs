@@ -672,6 +672,11 @@ pub(crate) enum AppEvent {
         status: McpServerStatus,
     },
 
+    /// Open the tool and resource inventory for one MCP server inside the manager.
+    OpenMcpServerInventory {
+        status: McpServerStatus,
+    },
+
     /// Result of the startup skills refresh that runs after the first frame is scheduled.
     ///
     /// This event is startup-only. Interactive skills refreshes are handled synchronously through the app

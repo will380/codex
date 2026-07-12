@@ -2240,25 +2240,19 @@ async fn slash_memory_drop_reports_stubbed_feature() {
 }
 
 #[tokio::test]
-async fn slash_mcp_requests_inventory_via_app_server() {
+async fn slash_mcp_uses_startup_inventory_cache() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let thread_id = ThreadId::new();
     chat.thread_id = Some(thread_id);
 
+    chat.on_mcp_manager_loaded(Ok(Vec::new()));
     chat.dispatch_command(SlashCommand::Mcp);
 
     insta::assert_snapshot!(
-        "mcp_manager_loading_popup",
+        "mcp_manager_empty_popup",
         render_bottom_popup(&chat, /*width*/ 80)
     );
-    assert_matches!(
-        rx.try_recv(),
-        Ok(AppEvent::FetchMcpInventory {
-            detail: McpServerStatusDetail::Full,
-            thread_id: Some(actual_thread_id),
-            presentation: crate::app_event::McpInventoryPresentation::Manager,
-        }) if actual_thread_id == thread_id
-    );
+    assert!(rx.try_recv().is_err(), "/mcp should use its startup cache");
     assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
 }
 
@@ -2345,11 +2339,22 @@ async fn mcp_manager_shows_servers_and_starts_selected_oauth() {
             thread_id: Some(actual_thread_id),
         }) if name == "github" && actual_thread_id == thread_id
     );
+    chat.on_mcp_oauth_login_starting("github");
+    chat.on_mcp_oauth_browser_opened("github", Ok(()));
+    insta::assert_snapshot!(
+        "mcp_manager_oauth_waiting_popup",
+        render_bottom_popup(&chat, /*width*/ 80)
+    );
+    chat.open_mcp_server_inventory(statuses[1].clone());
+    insta::assert_snapshot!(
+        "mcp_manager_inventory_popup",
+        render_bottom_popup(&chat, /*width*/ 80)
+    );
     assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
 }
 
 #[tokio::test]
-async fn mcp_oauth_completion_is_reported_in_history() {
+async fn mcp_oauth_completion_refreshes_manager_without_history() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
     chat.on_mcp_oauth_login_completed(
@@ -2361,14 +2366,14 @@ async fn mcp_oauth_completion_is_reported_in_history() {
         },
     );
 
-    let cells = drain_insert_history(&mut rx);
-    let rendered = cells
-        .iter()
-        .map(|cell| lines_to_single_string(cell))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(rendered.contains("Authenticated MCP server 'github'."));
-    assert!(rendered.contains("Run /mcp to review its updated status and tools."));
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::FetchMcpInventory {
+            presentation: crate::app_event::McpInventoryPresentation::Manager,
+            ..
+        })
+    );
+    assert!(drain_insert_history(&mut rx).is_empty());
     assert!(op_rx.try_recv().is_err(), "expected no core op to be sent");
 }
 

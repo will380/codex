@@ -780,6 +780,7 @@ impl App {
                 self.handle_mcp_inventory_result(result, detail, thread_id, presentation);
             }
             AppEvent::StartMcpOauthLogin { name, thread_id } => {
+                self.chat_widget.on_mcp_oauth_login_starting(&name);
                 self.start_mcp_oauth_login(app_server, name, thread_id);
             }
             AppEvent::McpOauthLoginStarted {
@@ -791,6 +792,9 @@ impl App {
             }
             AppEvent::OpenMcpServerActions { status } => {
                 self.chat_widget.open_mcp_server_actions(status);
+            }
+            AppEvent::OpenMcpServerInventory { status } => {
+                self.chat_widget.open_mcp_server_inventory(status);
             }
             AppEvent::SkillsListLoaded { result } => {
                 self.handle_skills_list_result(

@@ -1,0 +1,13 @@
+---
+source: tui/src/chatwidget/tests/slash_commands.rs
+expression: "render_bottom_popup(&chat, 80)"
+---
+  MCP server
+  github
+  Authentication: Waiting for browser sign-in…
+
+     Waiting for browser sign-in…  Complete sign-in in your browser; this
+                                   panel updates automatically.
+› 1. View tools and resources      Open the inventory inside the MCP manager.
+
+  Press enter to confirm or esc to go back

@@ -21,6 +21,7 @@ use std::io::Result;
 use std::sync::Arc;
 
 use crate::chatwidget::ActiveCellTranscriptKey;
+use crate::exec_cell::ExecCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::InlineExpansionRegion;
 use crate::history_cell::UserHistoryCell;
@@ -44,6 +45,8 @@ use crossterm::event::MouseEventKind;
 use ratatui::buffer::Buffer;
 use ratatui::buffer::Cell;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
@@ -1045,8 +1048,12 @@ impl TranscriptOverlay {
         let y = area
             .y
             .saturating_add(u16::try_from(viewport_row).unwrap_or(u16::MAX));
+        let mut hover_style = Style::default().bold();
+        if cell.as_any().is::<ExecCell>() && region.row > 0 {
+            hover_style = hover_style.fg(Color::Gray).remove_modifier(Modifier::DIM);
+        }
         for x in text_start..text_end {
-            buf[(x, y)].set_style(Style::default().bold());
+            buf[(x, y)].set_style(hover_style);
         }
     }
 
@@ -1617,7 +1624,7 @@ mod tests {
             TuiEvent::Mouse(crossterm::event::MouseEvent {
                 kind,
                 column: 6,
-                row: 1,
+                row: 0,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             })
         };
@@ -1625,7 +1632,7 @@ mod tests {
         overlay.handle_event(&mut tui, pointer(MouseEventKind::Moved))?;
         assert_eq!(overlay.hovered_cell, Some(0));
         overlay.render_scrollback(area, &mut buf);
-        let style = buf[(6, 1)].style();
+        let style = buf[(6, 0)].style();
         assert!(style.add_modifier.contains(ratatui::style::Modifier::BOLD));
         assert!(
             !style
@@ -1634,6 +1641,71 @@ mod tests {
         );
 
         overlay.handle_event(&mut tui, pointer(MouseEventKind::Down(MouseButton::Left)))?;
+        overlay.render_scrollback(area, &mut buf);
+        assert!(buffer_to_text(&buf, area).contains("output 15"));
+
+        let output_pointer = |kind| {
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 6,
+                row: 16,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            })
+        };
+        overlay.handle_event(&mut tui, output_pointer(MouseEventKind::Moved))?;
+        overlay.render_scrollback(area, &mut buf);
+        let output_style = buf[(6, 16)].style();
+        assert!(
+            output_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert!(
+            !output_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::DIM)
+        );
+        assert_eq!(output_style.fg, Some(ratatui::style::Color::Gray));
+
+        overlay.handle_event(
+            &mut tui,
+            output_pointer(MouseEventKind::Down(MouseButton::Left)),
+        )?;
+        overlay.render_scrollback(area, &mut buf);
+        assert!(!buffer_to_text(&buf, area).contains("output 15"));
+
+        let omitted_row = buffer_to_text(&buf, area)
+            .lines()
+            .position(|line| line.contains("… +"))
+            .expect("collapsed command output should show an omitted-line count")
+            .try_into()
+            .expect("test row should fit in u16");
+        let omitted_pointer = |kind| {
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 6,
+                row: omitted_row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            })
+        };
+        overlay.handle_event(&mut tui, omitted_pointer(MouseEventKind::Moved))?;
+        overlay.render_scrollback(area, &mut buf);
+        let omitted_style = buf[(6, omitted_row)].style();
+        assert!(
+            omitted_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert!(
+            !omitted_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::DIM)
+        );
+
+        overlay.handle_event(
+            &mut tui,
+            omitted_pointer(MouseEventKind::Down(MouseButton::Left)),
+        )?;
         overlay.render_scrollback(area, &mut buf);
         assert!(buffer_to_text(&buf, area).contains("output 15"));
         Ok(())

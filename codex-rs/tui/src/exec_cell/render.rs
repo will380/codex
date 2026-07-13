@@ -290,6 +290,14 @@ impl HistoryCell for ExecCell {
             return Vec::new();
         }
         let lines = self.command_display_lines_with_output(width, expanded);
+        let mut regions = lines
+            .first()
+            .map(|line| InlineExpansionRegion {
+                row: 0,
+                columns: 2..line.width(),
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
         let output_start = lines.iter().position(|line| {
             line.spans
                 .iter()
@@ -297,18 +305,20 @@ impl HistoryCell for ExecCell {
                 .collect::<String>()
                 .starts_with(EXEC_DISPLAY_LAYOUT.output_block.initial_prefix)
         });
-        output_start
-            .into_iter()
-            .flat_map(|start| start..lines.len())
-            .filter_map(|row| {
-                let line = &lines[row];
-                let end = line.width();
-                (end > 2).then_some(InlineExpansionRegion {
-                    row,
-                    columns: 2..end,
-                })
-            })
-            .collect()
+        regions.extend(
+            output_start
+                .into_iter()
+                .flat_map(|start| start..lines.len())
+                .filter_map(|row| {
+                    let line = &lines[row];
+                    let end = line.width();
+                    (end > 2).then_some(InlineExpansionRegion {
+                        row,
+                        columns: 2..end,
+                    })
+                }),
+        );
+        regions
     }
 }
 

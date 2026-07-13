@@ -141,7 +141,7 @@ pub struct TuiEventStream<S: EventSource + Default + Unpin = CrosstermEventSourc
     draw_stream: BroadcastStream<()>,
     resume_stream: WatchStream<()>,
     terminal_focused: Arc<AtomicBool>,
-    poll_draw_first: bool,
+    input_events_since_draw: usize,
     #[cfg(unix)]
     suspend_context: crate::tui::job_control::SuspendContext,
     #[cfg(unix)]
@@ -162,7 +162,7 @@ impl<S: EventSource + Default + Unpin> TuiEventStream<S> {
             draw_stream: BroadcastStream::new(draw_rx),
             resume_stream,
             terminal_focused,
-            poll_draw_first: false,
+            input_events_since_draw: 0,
             #[cfg(unix)]
             suspend_context,
             #[cfg(unix)]
@@ -275,22 +275,29 @@ impl<S: EventSource + Default + Unpin> Stream for TuiEventStream<S> {
     type Item = TuiEvent;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // approximate fairness + no starvation via round-robin.
-        let draw_first = self.poll_draw_first;
-        self.poll_draw_first = !self.poll_draw_first;
+        // Prefer a short burst of terminal input over redraw requests. Rendering a transcript can
+        // be considerably more expensive than rendering the normal composer; alternating one draw
+        // with every key therefore lets the visible input fall behind the terminal event queue.
+        // The bound keeps draw events responsive while coalescing ordinary typing into one frame.
+        const MAX_INPUT_EVENTS_BEFORE_DRAW: usize = 16;
+        let draw_first = self.input_events_since_draw >= MAX_INPUT_EVENTS_BEFORE_DRAW;
 
         if draw_first {
             if let Poll::Ready(event) = self.poll_draw_event(cx) {
+                self.input_events_since_draw = 0;
                 return Poll::Ready(event);
             }
             if let Poll::Ready(event) = self.poll_crossterm_event(cx) {
+                self.input_events_since_draw = self.input_events_since_draw.saturating_add(1);
                 return Poll::Ready(event);
             }
         } else {
             if let Poll::Ready(event) = self.poll_crossterm_event(cx) {
+                self.input_events_since_draw = self.input_events_since_draw.saturating_add(1);
                 return Poll::Ready(event);
             }
             if let Poll::Ready(event) = self.poll_draw_event(cx) {
+                self.input_events_since_draw = 0;
                 return Poll::Ready(event);
             }
         }
@@ -463,6 +470,54 @@ mod tests {
         }
 
         assert!(saw_draw && saw_key, "expected both draw and key events");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_typing_is_drained_before_draw() {
+        let (broker, handle, draw_tx, draw_rx, terminal_focused) = setup();
+        let mut stream = make_stream(broker, draw_rx, terminal_focused);
+
+        let _ = draw_tx.send(());
+        for character in "ffffa".chars() {
+            handle.send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE,
+            ))));
+        }
+
+        let mut typed = String::new();
+        for _ in 0..5 {
+            match stream.next().await {
+                Some(TuiEvent::Key(KeyEvent {
+                    code: KeyCode::Char(character),
+                    ..
+                })) => typed.push(character),
+                other => panic!("expected queued key event, got {other:?}"),
+            }
+        }
+
+        assert_eq!(typed, "ffffa");
+        assert!(matches!(stream.next().await, Some(TuiEvent::Draw)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sustained_input_cannot_starve_draws() {
+        let (broker, handle, draw_tx, draw_rx, terminal_focused) = setup();
+        let mut stream = make_stream(broker, draw_rx, terminal_focused);
+
+        let _ = draw_tx.send(());
+        for _ in 0..=16 {
+            handle.send(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('f'),
+                KeyModifiers::NONE,
+            ))));
+        }
+
+        for _ in 0..16 {
+            assert!(matches!(stream.next().await, Some(TuiEvent::Key(_))));
+        }
+        assert!(matches!(stream.next().await, Some(TuiEvent::Draw)));
+        assert!(matches!(stream.next().await, Some(TuiEvent::Key(_))));
     }
 
     #[tokio::test(flavor = "current_thread")]

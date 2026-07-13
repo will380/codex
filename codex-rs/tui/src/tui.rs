@@ -793,6 +793,10 @@ impl Tui {
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         if let Some(saved) = self.alt_saved_viewport.take() {
             self.terminal.set_viewport_area(saved);
+            // The main screen has just been restored outside the renderer's buffer model. Force a
+            // logical full repaint so stale placeholder or suggestion cells cannot survive where
+            // the alternate-screen composer rendered blanks. This does not clear the screen.
+            self.terminal.invalidate_viewport();
         }
         self.alt_screen_active.store(false, Ordering::Relaxed);
         Ok(())

@@ -11,7 +11,7 @@
 //!
 //! The transcript overlay is kept in sync by `App::overlay_forward_event`, which syncs a live tail
 //! during draws using `active_cell_transcript_key()` and
-//! `active_cell_transcript_hyperlink_lines()`. The
+//! `active_cell_transcript_hyperlink_lines_with_expansion()`. The
 //! cache key is designed to change when the active cell mutates in place or when its transcript
 //! output is time-dependent so the overlay can refresh its cached tail without rebuilding it on
 //! every draw.
@@ -301,6 +301,7 @@ use crate::history_cell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::HistoryRenderMode;
 use crate::history_cell::HookCell;
+use crate::history_cell::InlineExpansionRegion;
 use crate::history_cell::McpInvocation;
 use crate::history_cell::McpToolCallCell;
 use crate::history_cell::PlainHistoryCell;
@@ -1956,13 +1957,20 @@ impl ChatWidget {
     /// filters out empty results so the overlay can treat "nothing to render" as "no tail". Callers
     /// should pass the same width the overlay uses; using a different width will cause wrapping
     /// mismatches between the main viewport and the transcript overlay.
-    pub(crate) fn active_cell_transcript_hyperlink_lines(
+    pub(crate) fn active_cell_transcript_hyperlink_lines_with_expansion(
         &self,
         width: u16,
+        expanded: bool,
     ) -> Option<Vec<HyperlinkLine>> {
         let mut lines = Vec::new();
         if let Some(cell) = self.transcript.active_cell.as_ref() {
-            lines.extend(cell.transcript_hyperlink_lines(width));
+            let cell_lines = if expanded {
+                cell.expanded_transcript_hyperlink_lines(width)
+                    .unwrap_or_else(|| cell.transcript_hyperlink_lines(width))
+            } else {
+                cell.transcript_hyperlink_lines(width)
+            };
+            lines.extend(cell_lines);
         }
         if let Some(hook_cell) = self.active_hook_cell.as_ref() {
             // Compute hook lines first so hidden hooks do not add a separator.
@@ -1992,13 +2000,20 @@ impl ChatWidget {
     /// Returns the active cell exactly as it appears in the main conversation viewport.
     /// Mouse scrollback uses this condensed, styled representation so entering history does not
     /// suddenly expand command output or replace live-view formatting with raw transcript lines.
-    pub(crate) fn active_cell_display_hyperlink_lines(
+    pub(crate) fn active_cell_display_hyperlink_lines_with_expansion(
         &self,
         width: u16,
+        expanded: bool,
     ) -> Option<Vec<HyperlinkLine>> {
         let mut lines = Vec::new();
         if let Some(cell) = self.transcript.active_cell.as_ref() {
-            lines.extend(cell.display_hyperlink_lines(width));
+            let cell_lines = if expanded {
+                cell.expanded_display_hyperlink_lines(width)
+                    .unwrap_or_else(|| cell.display_hyperlink_lines(width))
+            } else {
+                cell.display_hyperlink_lines(width)
+            };
+            lines.extend(cell_lines);
         }
         if let Some(hook_cell) = self.active_hook_cell.as_ref() {
             let hook_lines = hook_cell.display_hyperlink_lines(width);
@@ -2024,9 +2039,42 @@ impl ChatWidget {
         (!lines.is_empty()).then_some(lines)
     }
 
+    pub(crate) fn active_cell_display_inline_expansion_regions(
+        &self,
+        width: u16,
+        expanded: bool,
+    ) -> Vec<InlineExpansionRegion> {
+        self.transcript
+            .active_cell
+            .as_ref()
+            .filter(|cell| cell.has_inline_expansion())
+            .map(|cell| cell.inline_expansion_regions(width, expanded))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn active_cell_transcript_inline_expansion_regions(
+        &self,
+        width: u16,
+        expanded: bool,
+    ) -> Vec<InlineExpansionRegion> {
+        self.transcript
+            .active_cell
+            .as_ref()
+            .filter(|cell| cell.has_inline_transcript_expansion())
+            .map(|cell| cell.inline_expansion_regions(width, expanded))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn active_cell_is_exec(&self) -> bool {
+        self.transcript
+            .active_cell
+            .as_ref()
+            .is_some_and(|cell| cell.as_any().is::<ExecCell>())
+    }
+
     #[cfg(test)]
     pub(crate) fn active_cell_transcript_lines(&self, width: u16) -> Option<Vec<Line<'static>>> {
-        self.active_cell_transcript_hyperlink_lines(width)
+        self.active_cell_transcript_hyperlink_lines_with_expansion(width, /*expanded*/ false)
             .map(crate::terminal_hyperlinks::visible_lines)
     }
 

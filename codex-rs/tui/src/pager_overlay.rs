@@ -624,6 +624,10 @@ pub(crate) struct TranscriptOverlay {
     presentation: TranscriptPresentation,
     /// Cache key for the render-only live tail appended after committed cells.
     live_tail_key: Option<LiveTailKey>,
+    /// Interactive regions for the current active-cell live tail.
+    live_tail_regions: Vec<InlineExpansionRegion>,
+    /// Whether the active-cell live tail is expanded inline.
+    live_tail_expanded: bool,
     is_done: bool,
 }
 
@@ -646,6 +650,10 @@ struct LiveTailKey {
     is_stream_continuation: bool,
     /// Optional animation tick to refresh spinners/progress indicators.
     animation_tick: Option<u64>,
+    /// Whether the live tail is currently rendered in its expanded form.
+    expanded: bool,
+    /// Whether command-output hover styling should brighten dim output rows.
+    is_exec: bool,
 }
 
 impl TranscriptOverlay {
@@ -681,6 +689,8 @@ impl TranscriptOverlay {
             expanded_cells: HashSet::new(),
             presentation,
             live_tail_key: None,
+            live_tail_regions: Vec::new(),
+            live_tail_expanded: false,
             is_done: false,
         }
     }
@@ -750,6 +760,8 @@ impl TranscriptOverlay {
         let follow_bottom = self.view.is_scrolled_to_bottom();
         let had_prior_cells = !self.cells.is_empty();
         let tail_renderable = self.take_live_tail_renderable();
+        self.live_tail_expanded = false;
+        self.live_tail_regions.clear();
         self.cells.push(cell);
         self.view.replace_renderables(Self::render_cells(
             &self.cells,
@@ -862,13 +874,19 @@ impl TranscriptOverlay {
         &mut self,
         width: u16,
         active_key: Option<ActiveCellTranscriptKey>,
-        compute_lines: impl FnOnce(u16) -> Option<Vec<HyperlinkLine>>,
+        is_exec: bool,
+        compute: impl FnOnce(u16, bool) -> (Option<Vec<HyperlinkLine>>, Vec<InlineExpansionRegion>),
     ) {
+        if active_key.is_none() {
+            self.live_tail_expanded = false;
+        }
         let next_key = active_key.map(|key| LiveTailKey {
             width,
             revision: key.revision,
             is_stream_continuation: key.is_stream_continuation,
             animation_tick: key.animation_tick,
+            expanded: self.live_tail_expanded,
+            is_exec,
         });
 
         if self.live_tail_key == next_key {
@@ -878,9 +896,12 @@ impl TranscriptOverlay {
 
         self.take_live_tail_renderable();
         self.live_tail_key = next_key;
+        self.live_tail_regions.clear();
 
         if let Some(key) = next_key {
-            let lines = compute_lines(width).unwrap_or_default();
+            let (lines, regions) = compute(width, self.live_tail_expanded);
+            let lines = lines.unwrap_or_default();
+            self.live_tail_regions = regions;
             if !lines.is_empty() {
                 self.view.push_renderable(Self::live_tail_renderable(
                     lines,
@@ -1020,16 +1041,28 @@ impl TranscriptOverlay {
         let (Some(index), Some(region)) = (self.hovered_cell, self.hovered_region.as_ref()) else {
             return;
         };
-        let Some(cell) = self.cells.get(index) else {
-            return;
-        };
         let Some(area) = self.view.last_content_area else {
             return;
         };
         let Some(start) = self.view.layout_starts.get(index).copied() else {
             return;
         };
-        let content_start = start + usize::from(index > 0 && !cell.is_stream_continuation());
+        let (content_start, is_exec) = if let Some(cell) = self.cells.get(index) {
+            (
+                start + usize::from(index > 0 && !cell.is_stream_continuation()),
+                cell.as_any().is::<ExecCell>(),
+            )
+        } else if index == self.cells.len() {
+            let Some(key) = self.live_tail_key else {
+                return;
+            };
+            (
+                start + usize::from(!self.cells.is_empty() && !key.is_stream_continuation),
+                key.is_exec,
+            )
+        } else {
+            return;
+        };
         let region_row = content_start.saturating_add(region.row);
         if region_row < self.view.scroll_offset {
             return;
@@ -1049,7 +1082,7 @@ impl TranscriptOverlay {
             .y
             .saturating_add(u16::try_from(viewport_row).unwrap_or(u16::MAX));
         let mut hover_style = Style::default().bold();
-        if cell.as_any().is::<ExecCell>() && region.row > 0 {
+        if is_exec && region.row > 0 {
             hover_style = hover_style.fg(Color::Gray).remove_modifier(Modifier::DIM);
         }
         for x in text_start..text_end {
@@ -1063,19 +1096,32 @@ impl TranscriptOverlay {
         row: u16,
     ) -> Option<(usize, InlineExpansionRegion)> {
         let (index, row_in_renderable) = self.view.renderable_position_at(column, row)?;
-        let cell = self.cells.get(index)?;
-        let interactive = match self.presentation {
-            TranscriptPresentation::Detailed => cell.has_inline_transcript_expansion(),
-            TranscriptPresentation::Display => cell.has_inline_expansion(),
-        };
-        if !interactive {
-            return None;
-        }
         let area = self.view.last_content_area?;
-        let content_row = row_in_renderable
-            .checked_sub(usize::from(index > 0 && !cell.is_stream_continuation()))?;
-        let expanded = self.expanded_cells.contains(&index);
-        cell.inline_expansion_regions(area.width, expanded)
+        let (content_row, regions) = if let Some(cell) = self.cells.get(index) {
+            let interactive = match self.presentation {
+                TranscriptPresentation::Detailed => cell.has_inline_transcript_expansion(),
+                TranscriptPresentation::Display => cell.has_inline_expansion(),
+            };
+            if !interactive {
+                return None;
+            }
+            let content_row = row_in_renderable
+                .checked_sub(usize::from(index > 0 && !cell.is_stream_continuation()))?;
+            let expanded = self.expanded_cells.contains(&index);
+            (
+                content_row,
+                cell.inline_expansion_regions(area.width, expanded),
+            )
+        } else if index == self.cells.len() {
+            let key = self.live_tail_key?;
+            let content_row = row_in_renderable.checked_sub(usize::from(
+                !self.cells.is_empty() && !key.is_stream_continuation,
+            ))?;
+            (content_row, self.live_tail_regions.clone())
+        } else {
+            return None;
+        };
+        regions
             .into_iter()
             .find(|region| {
                 let start = area
@@ -1125,12 +1171,16 @@ impl TranscriptOverlay {
                         if let Some((index, _)) =
                             self.interactive_region_at(mouse_event.column, mouse_event.row)
                         {
-                            if !self.expanded_cells.insert(index) {
-                                self.expanded_cells.remove(&index);
+                            if index == self.cells.len() && self.live_tail_key.is_some() {
+                                self.live_tail_expanded = !self.live_tail_expanded;
+                            } else {
+                                if !self.expanded_cells.insert(index) {
+                                    self.expanded_cells.remove(&index);
+                                }
+                                self.rebuild_renderables();
                             }
                             self.hovered_cell = None;
                             self.hovered_region = None;
-                            self.rebuild_renderables();
                             tui.frame_requester().schedule_frame();
                         }
                     }
@@ -1736,6 +1786,116 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn active_command_live_tail_hover_and_click_expand_inline() -> std::io::Result<()> {
+        let mut exec_cell = crate::exec_cell::new_active_exec_command(
+            "live-exec".into(),
+            vec!["bash".into(), "-lc".into(), "generate-output".into()],
+            vec![ParsedCommand::Unknown {
+                cmd: "generate-output".into(),
+            }],
+            ExecCommandSource::Agent,
+            /*interaction_input*/ None,
+            /*animations_enabled*/ false,
+        );
+        let output = (0..30)
+            .map(|line| format!("live output {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        exec_cell.complete_call(
+            "live-exec",
+            CommandOutput {
+                exit_code: 0,
+                aggregated_output: output.clone(),
+                formatted_output: output,
+            },
+            Duration::from_millis(50),
+        );
+        let exec_cell = Arc::new(exec_cell);
+        let mut overlay = TranscriptOverlay::new_with_presentation(
+            Vec::new(),
+            default_pager_keymap(),
+            TranscriptPresentation::Display,
+        );
+        let key = ActiveCellTranscriptKey {
+            revision: 1,
+            is_stream_continuation: false,
+            animation_tick: None,
+        };
+        let area = Rect::new(0, 0, 80, 40);
+        let sync = |overlay: &mut TranscriptOverlay| {
+            overlay.sync_live_tail(
+                area.width,
+                Some(key),
+                /*is_exec*/ true,
+                |width, expanded| {
+                    let lines = if expanded {
+                        exec_cell
+                            .expanded_display_hyperlink_lines(width)
+                            .unwrap_or_else(|| exec_cell.display_hyperlink_lines(width))
+                    } else {
+                        exec_cell.display_hyperlink_lines(width)
+                    };
+                    (
+                        Some(lines),
+                        exec_cell.inline_expansion_regions(width, expanded),
+                    )
+                },
+            );
+        };
+        sync(&mut overlay);
+        let mut buf = Buffer::empty(area);
+        overlay.render_scrollback(area, &mut buf);
+        assert!(!buffer_to_text(&buf, area).contains("live output 15"));
+
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        let pointer = |kind, row| {
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 6,
+                row,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            })
+        };
+        overlay.handle_event(&mut tui, pointer(MouseEventKind::Moved, 0))?;
+        assert_eq!(overlay.hovered_cell, Some(0));
+        overlay.render_scrollback(area, &mut buf);
+        assert!(
+            buf[(6, 0)]
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+
+        overlay.handle_event(
+            &mut tui,
+            pointer(MouseEventKind::Down(MouseButton::Left), 0),
+        )?;
+        assert!(overlay.live_tail_expanded);
+        sync(&mut overlay);
+        overlay.render_scrollback(area, &mut buf);
+        assert!(buffer_to_text(&buf, area).contains("live output 15"));
+
+        overlay.handle_event(&mut tui, pointer(MouseEventKind::Moved, 16))?;
+        overlay.render_scrollback(area, &mut buf);
+        let output_style = buf[(6, 16)].style();
+        assert!(
+            output_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert!(!output_style.add_modifier.contains(Modifier::DIM));
+        overlay.handle_event(
+            &mut tui,
+            pointer(MouseEventKind::Down(MouseButton::Left), 16),
+        )?;
+        assert!(!overlay.live_tail_expanded);
+        sync(&mut overlay);
+        overlay.render_scrollback(area, &mut buf);
+        assert!(!buffer_to_text(&buf, area).contains("live output 15"));
+        Ok(())
+    }
+
     #[test]
     fn edit_prev_hint_is_visible() {
         let mut overlay = transcript_overlay(vec![Arc::new(TestCell {
@@ -1861,7 +2021,8 @@ mod tests {
                 is_stream_continuation: false,
                 animation_tick: None,
             }),
-            |_| Some(vec![HyperlinkLine::from("tail")]),
+            /*is_exec*/ false,
+            |_, _| (Some(vec![HyperlinkLine::from("tail")]), Vec::new()),
         );
 
         let mut term = Terminal::new(TestBackend::new(40, 10)).expect("term");
@@ -1890,7 +2051,8 @@ mod tests {
                 is_stream_continuation: false,
                 animation_tick: None,
             }),
-            |width| Some(cell.transcript_hyperlink_lines(width)),
+            /*is_exec*/ false,
+            |width, _| (Some(cell.transcript_hyperlink_lines(width)), Vec::new()),
         );
         overlay.render(area, &mut buf);
 
@@ -1914,14 +2076,24 @@ mod tests {
             animation_tick: None,
         };
 
-        overlay.sync_live_tail(/*width*/ 40, Some(key), |_| {
-            calls.set(calls.get() + 1);
-            Some(vec![HyperlinkLine::from("tail")])
-        });
-        overlay.sync_live_tail(/*width*/ 40, Some(key), |_| {
-            calls.set(calls.get() + 1);
-            Some(vec![HyperlinkLine::from("tail2")])
-        });
+        overlay.sync_live_tail(
+            /*width*/ 40,
+            Some(key),
+            /*is_exec*/ false,
+            |_, _| {
+                calls.set(calls.get() + 1);
+                (Some(vec![HyperlinkLine::from("tail")]), Vec::new())
+            },
+        );
+        overlay.sync_live_tail(
+            /*width*/ 40,
+            Some(key),
+            /*is_exec*/ false,
+            |_, _| {
+                calls.set(calls.get() + 1);
+                (Some(vec![HyperlinkLine::from("tail2")]), Vec::new())
+            },
+        );
 
         assert_eq!(calls.get(), 1);
     }

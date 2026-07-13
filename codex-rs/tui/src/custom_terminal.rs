@@ -165,6 +165,11 @@ where
     pub last_known_cursor_pos: Position,
     /// Count of visible history rows rendered above the viewport in inline mode.
     visible_history_rows: u16,
+    /// Whether the next flush must repaint every cell in the viewport.
+    ///
+    /// Resetting the previous buffer is not enough after a raw terminal transition: blank cells in
+    /// both buffers still compare equal, even though the physical screen may contain restored text.
+    force_full_repaint: bool,
 }
 
 impl<B> Drop for Terminal<B>
@@ -242,6 +247,7 @@ where
             last_known_screen_size: screen_size,
             last_known_cursor_pos: cursor_pos,
             visible_history_rows: 0,
+            force_full_repaint: false,
         }
     }
 
@@ -297,12 +303,18 @@ where
     /// Obtains a difference between the previous and the current buffer and passes it to the
     /// current backend for drawing.
     pub fn flush(&mut self) -> io::Result<()> {
-        let updates = diff_buffers(self.previous_buffer(), self.current_buffer());
+        let updates = diff_buffers(
+            self.previous_buffer(),
+            self.current_buffer(),
+            self.force_full_repaint,
+        );
         let last_put_command = updates.iter().rfind(|command| command.is_put());
         if let Some(&DrawCommand::Put { x, y, .. }) = last_put_command {
             self.last_known_cursor_pos = Position { x, y };
         }
-        draw(&mut self.backend, updates.into_iter())
+        draw(&mut self.backend, updates.into_iter())?;
+        self.force_full_repaint = false;
+        Ok(())
     }
 
     /// Updates the Terminal so that internal buffers match the requested area.
@@ -498,7 +510,7 @@ where
     /// diff buffer. Call this after raw terminal operations that move screen
     /// content outside ratatui's knowledge.
     pub fn invalidate_viewport(&mut self) {
-        self.previous_buffer_mut().reset();
+        self.force_full_repaint = true;
     }
 
     /// Clear terminal scrollback (if supported) and force a full redraw.
@@ -582,7 +594,7 @@ enum DrawCommand {
     ClearToEnd { x: u16, y: u16, bg: Color },
 }
 
-fn diff_buffers(a: &Buffer, b: &Buffer) -> Vec<DrawCommand> {
+fn diff_buffers(a: &Buffer, b: &Buffer, force_full_repaint: bool) -> Vec<DrawCommand> {
     let previous_buffer = &a.content;
     let next_buffer = &b.content;
 
@@ -624,7 +636,10 @@ fn diff_buffers(a: &Buffer, b: &Buffer) -> Vec<DrawCommand> {
     // their place (the skipped cells should be blank anyway), or due to per-cell-skipping:
     let mut to_skip: usize = 0;
     for (i, (current, previous)) in next_buffer.iter().zip(previous_buffer.iter()).enumerate() {
-        if !current.skip && (current != previous || invalidated > 0) && to_skip == 0 {
+        if !current.skip
+            && (force_full_repaint || current != previous || invalidated > 0)
+            && to_skip == 0
+        {
             let (x, y) = a.pos_of(i);
             let row = i / a.area.width as usize;
             if x <= last_nonblank_columns[row] {
@@ -776,6 +791,7 @@ impl ModifierDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_backend::VT100Backend;
     use pretty_assertions::assert_eq;
     use ratatui::backend::WindowSize;
     use ratatui::layout::Rect;
@@ -891,7 +907,7 @@ mod tests {
             .expect("cell should exist")
             .set_symbol("X");
 
-        let commands = diff_buffers(&previous, &next);
+        let commands = diff_buffers(&previous, &next, /*force_full_repaint*/ false);
 
         let clear_count = commands
             .iter()
@@ -918,13 +934,64 @@ mod tests {
         previous.set_string(0, 0, "中文", Style::default());
         next.set_string(0, 0, "中", Style::default());
 
-        let commands = diff_buffers(&previous, &next);
+        let commands = diff_buffers(&previous, &next, /*force_full_repaint*/ false);
         assert!(
             commands
                 .iter()
                 .any(|command| matches!(command, DrawCommand::ClearToEnd { x: 2, y: 0, .. })),
             "expected clear-to-end to start after the remaining wide char; commands: {commands:?}"
         );
+    }
+
+    #[test]
+    fn invalidate_viewport_repaints_blank_cells_after_raw_screen_restore() {
+        let width = 12;
+        let area = Rect::new(0, 0, width, 1);
+        let mut terminal = Terminal::with_options(VT100Backend::new(width, 1)).expect("terminal");
+        terminal.set_viewport_area(area);
+
+        let render_draft = |frame: &mut Frame<'_>| {
+            frame.buffer.set_string(0, 0, "draft", Style::default());
+            frame
+                .buffer
+                .cell_mut((width - 1, 0))
+                .expect("border cell")
+                .set_symbol("│");
+        };
+        terminal.draw(render_draft).expect("initial draw");
+
+        // Simulate leaving an alternate screen: the physical inline surface is restored with an
+        // older gray suggestion, while the renderer still believes those cells are blank.
+        queue!(
+            terminal.backend_mut(),
+            MoveTo(0, 0),
+            Print("draftname"),
+            MoveTo(width - 1, 0),
+            Print("│")
+        )
+        .expect("restore stale inline row");
+        std::io::Write::flush(terminal.backend_mut()).expect("flush stale row");
+        assert!(
+            terminal
+                .backend()
+                .vt100()
+                .screen()
+                .contents()
+                .contains("draftname")
+        );
+
+        terminal.invalidate_viewport();
+        terminal.draw(render_draft).expect("repaint restored view");
+
+        let row = terminal
+            .backend()
+            .vt100()
+            .screen()
+            .rows(/*start*/ 0, width)
+            .next()
+            .expect("screen row");
+        assert!(row.starts_with("draft"), "unexpected row: {row:?}");
+        assert!(!row.contains("name"), "stale suggestion remained: {row:?}");
     }
 
     #[test]

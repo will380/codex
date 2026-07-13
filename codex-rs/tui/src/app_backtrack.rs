@@ -366,9 +366,17 @@ impl App {
         let size = tui.terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
         let width = area.width.max(1);
-        transcript.sync_live_tail(width, active_key, |w| {
-            chat_widget.active_cell_display_hyperlink_lines(w)
-        });
+        transcript.sync_live_tail(
+            width,
+            active_key,
+            chat_widget.active_cell_is_exec(),
+            |w, expanded| {
+                (
+                    chat_widget.active_cell_display_hyperlink_lines_with_expansion(w, expanded),
+                    chat_widget.active_cell_display_inline_expansion_regions(w, expanded),
+                )
+            },
+        );
         let composer_height = chat_widget.composer_surface_height(width);
         let (history, _indicator, composer) =
             anchored_scrollback_layout(area, composer_height, /*show_jump_indicator*/ false);
@@ -688,13 +696,23 @@ impl App {
             let chat_widget = &self.chat_widget;
             let mouse_scrollback_active = self.mouse_scrollback_active;
             let indicator_hovered = self.mouse_scrollback_indicator_hovered;
+            let active_cell_is_exec = chat_widget.active_cell_is_exec();
             tui.draw(u16::MAX, |frame| {
                 let width = frame.area().width.max(1);
-                t.sync_live_tail(width, active_key, |w| {
+                t.sync_live_tail(width, active_key, active_cell_is_exec, |w, expanded| {
                     if mouse_scrollback_active {
-                        chat_widget.active_cell_display_hyperlink_lines(w)
+                        (
+                            chat_widget
+                                .active_cell_display_hyperlink_lines_with_expansion(w, expanded),
+                            chat_widget.active_cell_display_inline_expansion_regions(w, expanded),
+                        )
                     } else {
-                        chat_widget.active_cell_transcript_hyperlink_lines(w)
+                        (
+                            chat_widget
+                                .active_cell_transcript_hyperlink_lines_with_expansion(w, expanded),
+                            chat_widget
+                                .active_cell_transcript_inline_expansion_regions(w, expanded),
+                        )
                     }
                 });
                 if mouse_scrollback_active {

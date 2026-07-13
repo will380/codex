@@ -23,6 +23,10 @@
 //! asking `ChatWidget` for an active-cell cache key and transcript lines and by passing them into
 //! `TranscriptOverlay::sync_live_tail`. This preserves the invariant that the overlay reflects
 //! both committed history and in-flight activity without changing flush or coalescing behavior.
+//!
+//! Mouse scrollback keeps the composer live, so its draw path must also drive the composer's
+//! paste-burst timer. Without that tick, rapid Windows key input remains buffered until another key
+//! arrives, making the visible draft appear one character behind.
 
 use std::any::TypeId;
 use std::path::PathBuf;
@@ -76,6 +80,15 @@ fn anchored_scrollback_layout(area: Rect, desired_composer_height: u16) -> (Rect
     );
     let composer = Rect::new(area.x, indicator.bottom(), area.width, composer_height);
     (transcript, indicator, composer)
+}
+
+fn handle_mouse_scrollback_paste_burst_tick(
+    chat_widget: &mut crate::chatwidget::ChatWidget,
+    frame_requester: tui::FrameRequester,
+    event: &TuiEvent,
+) -> bool {
+    matches!(event, TuiEvent::Draw | TuiEvent::Resize)
+        && chat_widget.handle_paste_burst_tick(frame_requester)
 }
 
 /// Aggregates all backtrack-related state used by the App.
@@ -398,6 +411,14 @@ impl App {
         app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<bool> {
+        if handle_mouse_scrollback_paste_burst_tick(
+            &mut self.chat_widget,
+            tui.frame_requester(),
+            &event,
+        ) {
+            return Ok(true);
+        }
+
         let viewport = tui.terminal.viewport_area;
         let composer_height = self.chat_widget.composer_surface_height(viewport.width);
         let (_, indicator, _composer) = anchored_scrollback_layout(viewport, composer_height);
@@ -968,6 +989,7 @@ fn agent_group_positions_iter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
     use crate::history_cell::AgentMessageCell;
     use crate::history_cell::HistoryCell;
     use pretty_assertions::assert_eq;
@@ -996,6 +1018,32 @@ mod tests {
         assert_eq!(composer, Rect::new(0, 24, 80, 6));
         assert_eq!(indicator.bottom(), composer.y);
         assert_eq!(composer.bottom(), area.bottom());
+    }
+
+    #[tokio::test]
+    async fn mouse_scrollback_draw_flushes_rapid_typing_without_another_key() {
+        let (mut chat_widget, _app_event_tx, _app_event_rx, _op_rx) =
+            make_chatwidget_manual_with_sender().await;
+        for character in "ffff".chars() {
+            chat_widget
+                .handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert_ne!(chat_widget.composer_text_with_pending(), "ffff");
+
+        let flush_delay = if cfg!(windows) {
+            std::time::Duration::from_millis(70)
+        } else {
+            std::time::Duration::from_millis(20)
+        };
+        tokio::time::sleep(flush_delay).await;
+        let tui = crate::tui::test_support::make_test_tui().expect("create test TUI");
+
+        assert!(handle_mouse_scrollback_paste_burst_tick(
+            &mut chat_widget,
+            tui.frame_requester(),
+            &TuiEvent::Draw,
+        ));
+        assert_eq!(chat_widget.composer_text_with_pending(), "ffff");
     }
 
     #[test]

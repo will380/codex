@@ -31,11 +31,10 @@ use std::sync::Arc;
 use crate::app::App;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
+use crate::app_server_session::AppServerSession;
 use crate::chatwidget::UserMessage;
-use crate::diff_render::DiffSummary;
 #[cfg(test)]
 use crate::history_cell::AgentMessageCell;
-use crate::history_cell::HistoryCellInteraction;
 use crate::history_cell::SessionInfoCell;
 use crate::history_cell::UserHistoryCell;
 use crate::pager_overlay::Overlay;
@@ -47,6 +46,7 @@ use color_eyre::eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
 use crossterm::event::MouseButton;
 use crossterm::event::MouseEvent;
 use crossterm::event::MouseEventKind;
@@ -141,10 +141,13 @@ impl App {
     pub(crate) async fn handle_backtrack_overlay_event(
         &mut self,
         tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<bool> {
         if self.mouse_scrollback_active {
-            return self.handle_mouse_scrollback_overlay_event(tui, event);
+            return self
+                .handle_mouse_scrollback_overlay_event(tui, app_server, event)
+                .await;
         }
         if self.backtrack.overlay_preview_active {
             match event {
@@ -327,21 +330,27 @@ impl App {
         let Some(Overlay::Transcript(transcript)) = &mut self.overlay else {
             return Ok(());
         };
-        tui.enter_alt_screen_and_draw(|frame| {
-            let width = frame.area().width.max(1);
-            transcript.sync_live_tail(width, active_key, |w| {
-                chat_widget.active_cell_display_hyperlink_lines(w)
-            });
-            let composer_height = chat_widget.composer_surface_height(width);
-            let (history, indicator, composer) =
-                anchored_scrollback_layout(frame.area(), composer_height);
-            transcript.render_scrollback(history, frame.buffer);
-            Paragraph::new(Line::from("↓ Jump to latest · click or press End").light_blue())
-                .centered()
-                .render(indicator, frame.buffer);
-            chat_widget.render_composer_surface(composer, frame.buffer);
-            if let Some((x, y)) = chat_widget.composer_surface_cursor_pos(composer) {
-                frame.set_cursor_style(chat_widget.composer_surface_cursor_style(composer));
+        let size = tui.terminal.size()?;
+        let area = Rect::new(0, 0, size.width, size.height);
+        let width = area.width.max(1);
+        transcript.sync_live_tail(width, active_key, |w| {
+            chat_widget.active_cell_display_hyperlink_lines(w)
+        });
+        let composer_height = chat_widget.composer_surface_height(width);
+        let (history, indicator, composer) = anchored_scrollback_layout(area, composer_height);
+        let mut prepared = ratatui::buffer::Buffer::empty(area);
+        transcript.render_scrollback(history, &mut prepared);
+        Paragraph::new(Line::from("↓ Jump to latest · click or Ctrl+End").light_blue())
+            .centered()
+            .render(indicator, &mut prepared);
+        chat_widget.render_composer_surface(composer, &mut prepared);
+        let cursor = chat_widget.composer_surface_cursor_pos(composer);
+        let cursor_style = chat_widget.composer_surface_cursor_style(composer);
+
+        tui.enter_alt_screen_and_draw(move |frame| {
+            *frame.buffer = prepared;
+            if let Some((x, y)) = cursor {
+                frame.set_cursor_style(cursor_style);
                 frame.set_cursor_position((x, y));
             }
         })?;
@@ -383,9 +392,10 @@ impl App {
         self.overlay_forward_event(tui, TuiEvent::Mouse(mouse_event))
     }
 
-    fn handle_mouse_scrollback_overlay_event(
+    async fn handle_mouse_scrollback_overlay_event(
         &mut self,
         tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<bool> {
         let viewport = tui.terminal.viewport_area;
@@ -423,19 +433,32 @@ impl App {
             event,
             TuiEvent::Key(KeyEvent {
                 code: KeyCode::End,
+                modifiers,
                 kind: KeyEventKind::Press | KeyEventKind::Repeat,
                 ..
-            })
+            }) if modifiers.contains(KeyModifiers::CONTROL)
         );
         if jump_requested {
             self.close_transcript_overlay(tui);
             return Ok(true);
         }
 
+        if matches!(
+            event,
+            TuiEvent::Key(KeyEvent {
+                code: KeyCode::PageUp | KeyCode::PageDown,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            })
+        ) {
+            self.overlay_forward_event(tui, event)?;
+            return Ok(true);
+        }
+
         if let TuiEvent::Key(key_event) = &event {
             let key_event = *key_event;
             let had_draft = !self.chat_widget.composer_is_empty();
-            self.chat_widget.handle_key_event(key_event);
+            self.handle_key_event(tui, app_server, key_event).await;
             let submitted = had_draft
                 && self.chat_widget.composer_is_empty()
                 && matches!(
@@ -621,7 +644,7 @@ impl App {
                         anchored_scrollback_layout(frame.area(), composer_height);
                     t.render_scrollback(transcript, frame.buffer);
                     let indicator_line =
-                        Line::from("↓ Jump to latest · click or press End").light_blue();
+                        Line::from("↓ Jump to latest · click or Ctrl+End").light_blue();
                     let indicator_line = if indicator_hovered {
                         indicator_line.reversed().bold()
                     } else {
@@ -656,21 +679,7 @@ impl App {
 
         if let Some(overlay) = &mut self.overlay {
             overlay.handle_event(tui, event)?;
-            let interaction = overlay.take_interaction();
             let overlay_done = overlay.is_done();
-            if let Some(HistoryCellInteraction::OpenPatchDiff { changes, cwd }) = interaction {
-                let diff: Box<dyn crate::render::renderable::Renderable> =
-                    DiffSummary::new(changes, cwd).into();
-                self.overlay = Some(Overlay::new_static_with_renderables(
-                    vec![diff],
-                    "F U L L  D I F F".to_string(),
-                    self.keymap.pager.clone(),
-                ));
-                self.mouse_scrollback_active = false;
-                self.mouse_scrollback_indicator_hovered = false;
-                tui.frame_requester().schedule_frame();
-                return Ok(());
-            }
             if overlay_done {
                 self.close_transcript_overlay(tui);
                 tui.frame_requester().schedule_frame();

@@ -1279,7 +1279,9 @@ See the Codex keymap documentation for supported actions and examples."
         }
 
         if self.overlay.is_some() {
-            let _ = self.handle_backtrack_overlay_event(tui, event).await?;
+            let _ = self
+                .handle_backtrack_overlay_event(tui, app_server, event)
+                .await?;
         } else {
             match event {
                 TuiEvent::Key(key_event) => {

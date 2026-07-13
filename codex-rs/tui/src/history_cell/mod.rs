@@ -148,12 +148,10 @@ pub(crate) enum HistoryRenderMode {
     Raw,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) enum HistoryCellInteraction {
-    OpenPatchDiff {
-        changes: HashMap<PathBuf, FileChange>,
-        cwd: AbsolutePathBuf,
-    },
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InlineExpansionRegion {
+    pub(crate) row: usize,
+    pub(crate) columns: std::ops::Range<usize>,
 }
 
 pub(crate) fn raw_lines_from_source(source: &str) -> Vec<Line<'static>> {
@@ -305,13 +303,36 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
         None
     }
 
-    /// Optional action for transcript cells that behave like compact interactive objects.
-    fn transcript_interaction(&self) -> Option<HistoryCellInteraction> {
+    /// Optional expanded form for compact cells in the rich transcript surface.
+    fn expanded_display_hyperlink_lines(&self, _width: u16) -> Option<Vec<HyperlinkLine>> {
         None
     }
 
-    fn has_transcript_interaction(&self) -> bool {
+    /// Optional expanded form for the detailed transcript surface.
+    fn expanded_transcript_hyperlink_lines(&self, width: u16) -> Option<Vec<HyperlinkLine>> {
+        self.expanded_display_hyperlink_lines(width)
+    }
+
+    fn has_inline_expansion(&self) -> bool {
         false
+    }
+
+    fn has_inline_transcript_expansion(&self) -> bool {
+        self.has_inline_expansion()
+    }
+
+    fn inline_expansion_regions(&self, width: u16, _expanded: bool) -> Vec<InlineExpansionRegion> {
+        if !self.has_inline_expansion() {
+            return Vec::new();
+        }
+        self.display_hyperlink_lines(width)
+            .first()
+            .map(|line| InlineExpansionRegion {
+                row: 0,
+                columns: 2..line.width(),
+            })
+            .into_iter()
+            .collect()
     }
 }
 

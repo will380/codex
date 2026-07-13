@@ -15,12 +15,14 @@
 //! recomputed. `ChatWidget` is responsible for producing a key that changes when the active cell
 //! mutates in place or when its transcript output is time-dependent.
 
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io::Result;
 use std::sync::Arc;
 
 use crate::chatwidget::ActiveCellTranscriptKey;
 use crate::history_cell::HistoryCell;
-use crate::history_cell::HistoryCellInteraction;
+use crate::history_cell::InlineExpansionRegion;
 use crate::history_cell::UserHistoryCell;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
@@ -108,13 +110,6 @@ impl Overlay {
         match self {
             Overlay::Transcript(o) => o.is_scrolled_to_bottom(),
             Overlay::Static(_) => false,
-        }
-    }
-
-    pub(crate) fn take_interaction(&mut self) -> Option<HistoryCellInteraction> {
-        match self {
-            Overlay::Transcript(o) => o.pending_interaction.take(),
-            Overlay::Static(_) => None,
         }
     }
 }
@@ -430,7 +425,7 @@ impl PagerView {
         area
     }
 
-    fn renderable_index_at(&self, column: u16, row: u16) -> Option<usize> {
+    fn renderable_position_at(&self, column: u16, row: u16) -> Option<(usize, usize)> {
         let area = self.last_content_area?;
         if column < area.x || column >= area.right() || row < area.y || row >= area.bottom() {
             return None;
@@ -443,7 +438,7 @@ impl PagerView {
             .partition_point(|start| *start <= logical_row)
             .checked_sub(1)?;
         (logical_row < self.layout_starts[index].saturating_add(self.layout_heights[index]))
-            .then_some(index)
+            .then_some((index, logical_row.saturating_sub(self.layout_starts[index])))
     }
 }
 
@@ -525,14 +520,13 @@ struct CellRenderable {
     cell: Arc<dyn HistoryCell>,
     style: Style,
     presentation: TranscriptPresentation,
+    expanded: bool,
+    lines_cache: RefCell<Option<(u16, Vec<HyperlinkLine>)>>,
 }
 
 impl Renderable for CellRenderable {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let hyperlink_lines = match self.presentation {
-            TranscriptPresentation::Detailed => self.cell.transcript_hyperlink_lines(area.width),
-            TranscriptPresentation::Display => self.cell.display_hyperlink_lines(area.width),
-        };
+        let hyperlink_lines = self.hyperlink_lines(area.width);
         let p = Paragraph::new(Text::from(visible_lines(hyperlink_lines.clone())))
             .style(self.style)
             .wrap(Wrap { trim: false });
@@ -541,9 +535,52 @@ impl Renderable for CellRenderable {
     }
 
     fn desired_height(&self, width: u16) -> u16 {
+        if self.expanded {
+            return Paragraph::new(Text::from(visible_lines(self.hyperlink_lines(width))))
+                .wrap(Wrap { trim: false })
+                .line_count(width)
+                .try_into()
+                .unwrap_or(0);
+        }
         match self.presentation {
             TranscriptPresentation::Detailed => self.cell.desired_transcript_height(width),
             TranscriptPresentation::Display => self.cell.desired_height(width),
+        }
+    }
+}
+
+impl CellRenderable {
+    fn hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        if let Some((_, lines)) = self
+            .lines_cache
+            .borrow()
+            .as_ref()
+            .filter(|(cached_width, _)| *cached_width == width)
+        {
+            return lines.clone();
+        }
+        let lines = self.compute_hyperlink_lines(width);
+        self.lines_cache.replace(Some((width, lines.clone())));
+        lines
+    }
+
+    fn compute_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        if self.expanded {
+            let expanded = match self.presentation {
+                TranscriptPresentation::Detailed => {
+                    self.cell.expanded_transcript_hyperlink_lines(width)
+                }
+                TranscriptPresentation::Display => {
+                    self.cell.expanded_display_hyperlink_lines(width)
+                }
+            };
+            if let Some(lines) = expanded {
+                return lines;
+            }
+        }
+        match self.presentation {
+            TranscriptPresentation::Detailed => self.cell.transcript_hyperlink_lines(width),
+            TranscriptPresentation::Display => self.cell.display_hyperlink_lines(width),
         }
     }
 }
@@ -579,7 +616,8 @@ pub(crate) struct TranscriptOverlay {
     cells: Vec<Arc<dyn HistoryCell>>,
     highlight_cell: Option<usize>,
     hovered_cell: Option<usize>,
-    pending_interaction: Option<HistoryCellInteraction>,
+    hovered_region: Option<InlineExpansionRegion>,
+    expanded_cells: HashSet<usize>,
     presentation: TranscriptPresentation,
     /// Cache key for the render-only live tail appended after committed cells.
     live_tail_key: Option<LiveTailKey>,
@@ -626,7 +664,7 @@ impl TranscriptOverlay {
                 Self::render_cells(
                     &transcript_cells,
                     /*highlight_cell*/ None,
-                    /*hovered_cell*/ None,
+                    &HashSet::new(),
                     presentation,
                 ),
                 "T R A N S C R I P T".to_string(),
@@ -636,7 +674,8 @@ impl TranscriptOverlay {
             cells: transcript_cells,
             highlight_cell: None,
             hovered_cell: None,
-            pending_interaction: None,
+            hovered_region: None,
+            expanded_cells: HashSet::new(),
             presentation,
             live_tail_key: None,
             is_done: false,
@@ -646,7 +685,7 @@ impl TranscriptOverlay {
     fn render_cells(
         cells: &[Arc<dyn HistoryCell>],
         highlight_cell: Option<usize>,
-        hovered_cell: Option<usize>,
+        expanded_cells: &HashSet<usize>,
         presentation: TranscriptPresentation,
     ) -> Vec<Box<dyn Renderable>> {
         cells
@@ -654,15 +693,19 @@ impl TranscriptOverlay {
             .enumerate()
             .flat_map(|(i, c)| {
                 let mut v: Vec<Box<dyn Renderable>> = Vec::new();
-                let hovered = hovered_cell == Some(i) && c.has_transcript_interaction();
+                let interactive = match presentation {
+                    TranscriptPresentation::Detailed => c.has_inline_transcript_expansion(),
+                    TranscriptPresentation::Display => c.has_inline_expansion(),
+                };
+                let expanded = expanded_cells.contains(&i) && interactive;
                 let mut cell_renderable = if c.as_any().is::<UserHistoryCell>() {
                     Box::new(CachedRenderable::new(CellRenderable {
                         cell: c.clone(),
                         presentation,
+                        expanded,
+                        lines_cache: RefCell::new(None),
                         style: if highlight_cell == Some(i) {
                             user_message_style().reversed()
-                        } else if hovered {
-                            user_message_style().reversed().bold()
                         } else {
                             user_message_style()
                         },
@@ -671,11 +714,9 @@ impl TranscriptOverlay {
                     Box::new(CachedRenderable::new(CellRenderable {
                         cell: c.clone(),
                         presentation,
-                        style: if hovered {
-                            Style::default().reversed().bold()
-                        } else {
-                            Style::default()
-                        },
+                        expanded,
+                        lines_cache: RefCell::new(None),
+                        style: Style::default(),
                     })) as Box<dyn Renderable>
                 };
                 if !c.is_stream_continuation() && i > 0 {
@@ -710,7 +751,7 @@ impl TranscriptOverlay {
         self.view.replace_renderables(Self::render_cells(
             &self.cells,
             self.highlight_cell,
-            self.hovered_cell,
+            &self.expanded_cells,
             self.presentation,
         ));
         if let Some(tail) = tail_renderable {
@@ -745,6 +786,7 @@ impl TranscriptOverlay {
     pub(crate) fn replace_cells(&mut self, cells: Vec<Arc<dyn HistoryCell>>) {
         let follow_bottom = self.view.is_scrolled_to_bottom();
         self.cells = cells;
+        self.expanded_cells.retain(|idx| *idx < self.cells.len());
         if self
             .highlight_cell
             .is_some_and(|idx| idx >= self.cells.len())
@@ -787,6 +829,7 @@ impl TranscriptOverlay {
             }
             self.cells
                 .splice(clamped_start..clamped_end, std::iter::once(consolidated));
+            self.expanded_cells.clear();
             if self
                 .highlight_cell
                 .is_some_and(|highlight_cell| highlight_cell >= self.cells.len())
@@ -869,7 +912,7 @@ impl TranscriptOverlay {
         self.view.replace_renderables(Self::render_cells(
             &self.cells,
             self.highlight_cell,
-            self.hovered_cell,
+            &self.expanded_cells,
             self.presentation,
         ));
         if let Some(tail) = tail_renderable {
@@ -961,19 +1004,83 @@ impl TranscriptOverlay {
         let top = Rect::new(area.x, area.y, area.width, top_h);
         let bottom = Rect::new(area.x, area.y + top_h, area.width, 3);
         self.view.render(top, buf);
+        self.render_hovered_region(buf);
         self.render_hints(bottom, buf);
     }
 
     pub(crate) fn render_scrollback(&mut self, area: Rect, buf: &mut Buffer) {
         self.view.render_bare(area, buf);
+        self.render_hovered_region(buf);
     }
 
-    fn interactive_cell_at(&self, column: u16, row: u16) -> Option<usize> {
-        let index = self.view.renderable_index_at(column, row)?;
-        self.cells
-            .get(index)?
-            .has_transcript_interaction()
-            .then_some(index)
+    fn render_hovered_region(&self, buf: &mut Buffer) {
+        let (Some(index), Some(region)) = (self.hovered_cell, self.hovered_region.as_ref()) else {
+            return;
+        };
+        let Some(cell) = self.cells.get(index) else {
+            return;
+        };
+        let Some(area) = self.view.last_content_area else {
+            return;
+        };
+        let Some(start) = self.view.layout_starts.get(index).copied() else {
+            return;
+        };
+        let content_start = start + usize::from(index > 0 && !cell.is_stream_continuation());
+        let region_row = content_start.saturating_add(region.row);
+        if region_row < self.view.scroll_offset {
+            return;
+        }
+        let viewport_row = region_row - self.view.scroll_offset;
+        if viewport_row >= usize::from(area.height) {
+            return;
+        }
+        let text_start = area
+            .x
+            .saturating_add(u16::try_from(region.columns.start).unwrap_or(u16::MAX));
+        let text_end = area
+            .x
+            .saturating_add(u16::try_from(region.columns.end).unwrap_or(u16::MAX))
+            .min(area.right());
+        let y = area
+            .y
+            .saturating_add(u16::try_from(viewport_row).unwrap_or(u16::MAX));
+        for x in text_start..text_end {
+            buf[(x, y)].set_style(Style::default().bold());
+        }
+    }
+
+    fn interactive_region_at(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> Option<(usize, InlineExpansionRegion)> {
+        let (index, row_in_renderable) = self.view.renderable_position_at(column, row)?;
+        let cell = self.cells.get(index)?;
+        let interactive = match self.presentation {
+            TranscriptPresentation::Detailed => cell.has_inline_transcript_expansion(),
+            TranscriptPresentation::Display => cell.has_inline_expansion(),
+        };
+        if !interactive {
+            return None;
+        }
+        let area = self.view.last_content_area?;
+        let content_row = row_in_renderable
+            .checked_sub(usize::from(index > 0 && !cell.is_stream_continuation()))?;
+        let expanded = self.expanded_cells.contains(&index);
+        cell.inline_expansion_regions(area.width, expanded)
+            .into_iter()
+            .find(|region| {
+                let start = area
+                    .x
+                    .saturating_add(u16::try_from(region.columns.start).unwrap_or(u16::MAX));
+                let end = area
+                    .x
+                    .saturating_add(u16::try_from(region.columns.end).unwrap_or(u16::MAX))
+                    .min(area.right());
+                content_row == region.row && column >= start && column < end
+            })
+            .map(|region| (index, region))
     }
 }
 
@@ -994,18 +1101,30 @@ impl TranscriptOverlay {
                     MouseEventKind::ScrollUp => self.view.scroll_lines_up(tui, 3),
                     MouseEventKind::ScrollDown => self.view.scroll_lines_down(tui, 3),
                     MouseEventKind::Moved => {
-                        let hovered = self.interactive_cell_at(mouse_event.column, mouse_event.row);
-                        if self.hovered_cell != hovered {
-                            self.hovered_cell = hovered;
-                            self.rebuild_renderables();
+                        let hovered =
+                            self.interactive_region_at(mouse_event.column, mouse_event.row);
+                        let (hovered_cell, hovered_region) = hovered
+                            .map(|(index, region)| (Some(index), Some(region)))
+                            .unwrap_or((None, None));
+                        if self.hovered_cell != hovered_cell
+                            || self.hovered_region != hovered_region
+                        {
+                            self.hovered_cell = hovered_cell;
+                            self.hovered_region = hovered_region;
                             tui.frame_requester().schedule_frame();
                         }
                     }
                     MouseEventKind::Down(MouseButton::Left) => {
-                        if let Some(index) =
-                            self.interactive_cell_at(mouse_event.column, mouse_event.row)
+                        if let Some((index, _)) =
+                            self.interactive_region_at(mouse_event.column, mouse_event.row)
                         {
-                            self.pending_interaction = self.cells[index].transcript_interaction();
+                            if !self.expanded_cells.insert(index) {
+                                self.expanded_cells.remove(&index);
+                            }
+                            self.hovered_cell = None;
+                            self.hovered_region = None;
+                            self.rebuild_renderables();
+                            tui.frame_requester().schedule_frame();
                         }
                     }
                     _ => {}
@@ -1264,6 +1383,22 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct CountingHistoryCell {
+        display_calls: Arc<AtomicUsize>,
+    }
+
+    impl HistoryCell for CountingHistoryCell {
+        fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+            self.display_calls.fetch_add(1, Ordering::Relaxed);
+            vec![Line::from("cached transcript row")]
+        }
+
+        fn raw_lines(&self) -> Vec<Line<'static>> {
+            vec![Line::from("cached transcript row")]
+        }
+    }
+
     #[test]
     fn scrolling_reuses_cached_transcript_layout() {
         let desired_height_calls = Arc::new(AtomicUsize::new(0));
@@ -1286,8 +1421,88 @@ mod tests {
         assert_eq!(desired_height_calls.load(Ordering::Relaxed), 500);
     }
 
+    #[test]
+    fn repeated_draws_reuse_committed_cell_lines() {
+        let display_calls = Arc::new(AtomicUsize::new(0));
+        let mut overlay = TranscriptOverlay::new_with_presentation(
+            vec![Arc::new(CountingHistoryCell {
+                display_calls: display_calls.clone(),
+            })],
+            default_pager_keymap(),
+            TranscriptPresentation::Display,
+        );
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+
+        overlay.render_scrollback(area, &mut buf);
+        let calls_after_first_draw = display_calls.load(Ordering::Relaxed);
+        overlay.render_scrollback(area, &mut buf);
+
+        assert!(calls_after_first_draw > 0);
+        assert_eq!(
+            display_calls.load(Ordering::Relaxed),
+            calls_after_first_draw
+        );
+    }
+
     #[tokio::test]
-    async fn patch_summary_hover_and_click_produce_full_diff_interaction() -> std::io::Result<()> {
+    async fn patch_headline_hover_is_subtle_and_click_expands_inline() -> std::io::Result<()> {
+        let cwd = std::env::current_dir()?;
+        let changes = HashMap::from([(
+            PathBuf::from("src/large.rs"),
+            FileChange::Add {
+                content: (0..25).map(|line| format!("line {line}\n")).collect(),
+            },
+        )]);
+        let mut overlay = transcript_overlay(vec![Arc::new(new_patch_event(changes, &cwd))]);
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        overlay.render(area, &mut buf);
+        let headline_style_before = buf[(10, 1)].style();
+        assert!(
+            !headline_style_before
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        let body_style_before = buf[(10, 2)].style();
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        let pointer = |kind| {
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 10,
+                row: 1,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            })
+        };
+
+        overlay.handle_event(&mut tui, pointer(MouseEventKind::Moved))?;
+        assert_eq!(overlay.hovered_cell, Some(0));
+        overlay.render(area, &mut buf);
+        let headline_style = buf[(10, 1)].style();
+        assert!(
+            headline_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert!(
+            !headline_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
+        assert_eq!(buf[(10, 2)].style(), body_style_before);
+
+        overlay.handle_event(&mut tui, pointer(MouseEventKind::Down(MouseButton::Left)))?;
+        assert!(overlay.expanded_cells.contains(&0));
+        overlay.render(area, &mut buf);
+        assert!(buffer_to_text(&buf, area).contains("line 24"));
+
+        overlay.handle_event(&mut tui, pointer(MouseEventKind::Down(MouseButton::Left)))?;
+        assert!(!overlay.expanded_cells.contains(&0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn patch_preview_body_is_not_a_hover_target() -> std::io::Result<()> {
         let cwd = std::env::current_dir()?;
         let changes = HashMap::from([(
             PathBuf::from("src/large.rs"),
@@ -1300,10 +1515,108 @@ mod tests {
         let mut buf = Buffer::empty(area);
         overlay.render(area, &mut buf);
         let mut tui = crate::tui::test_support::make_test_tui()?;
+        overlay.handle_event(
+            &mut tui,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 8,
+                row: 2,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            }),
+        )?;
+
+        assert_eq!(overlay.hovered_cell, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn patch_omitted_count_hover_and_click_expand_inline() -> std::io::Result<()> {
+        let cwd = std::env::current_dir()?;
+        let changes = HashMap::from([(
+            PathBuf::from("src/large.rs"),
+            FileChange::Add {
+                content: (0..25).map(|line| format!("line {line}\n")).collect(),
+            },
+        )]);
+        let mut overlay = TranscriptOverlay::new_with_presentation(
+            vec![Arc::new(new_patch_event(changes, &cwd))],
+            default_pager_keymap(),
+            TranscriptPresentation::Display,
+        );
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        overlay.render_scrollback(area, &mut buf);
+        let mut tui = crate::tui::test_support::make_test_tui()?;
         let pointer = |kind| {
             TuiEvent::Mouse(crossterm::event::MouseEvent {
                 kind,
-                column: 1,
+                column: 8,
+                row: 7,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            })
+        };
+
+        overlay.handle_event(&mut tui, pointer(MouseEventKind::Moved))?;
+        assert_eq!(overlay.hovered_cell, Some(0));
+        assert_eq!(
+            overlay.hovered_region.as_ref().map(|region| region.row),
+            Some(7)
+        );
+        overlay.render_scrollback(area, &mut buf);
+        let style = buf[(8, 7)].style();
+        assert!(style.add_modifier.contains(ratatui::style::Modifier::BOLD));
+        assert!(
+            !style
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
+
+        overlay.handle_event(&mut tui, pointer(MouseEventKind::Down(MouseButton::Left)))?;
+        assert!(overlay.expanded_cells.contains(&0));
+        overlay.render_scrollback(area, &mut buf);
+        assert!(buffer_to_text(&buf, area).contains("line 24"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn command_output_hover_and_click_reveal_full_output_inline() -> std::io::Result<()> {
+        let mut exec_cell = crate::exec_cell::new_active_exec_command(
+            "exec-output".into(),
+            vec!["bash".into(), "-lc".into(), "generate-output".into()],
+            vec![ParsedCommand::Unknown {
+                cmd: "generate-output".into(),
+            }],
+            ExecCommandSource::Agent,
+            /*interaction_input*/ None,
+            /*animations_enabled*/ false,
+        );
+        let output = (0..30)
+            .map(|line| format!("output {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        exec_cell.complete_call(
+            "exec-output",
+            CommandOutput {
+                exit_code: 0,
+                aggregated_output: output.clone(),
+                formatted_output: output,
+            },
+            Duration::from_millis(50),
+        );
+        let mut overlay = TranscriptOverlay::new_with_presentation(
+            vec![Arc::new(exec_cell)],
+            default_pager_keymap(),
+            TranscriptPresentation::Display,
+        );
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        overlay.render_scrollback(area, &mut buf);
+        assert!(!buffer_to_text(&buf, area).contains("output 15"));
+        let mut tui = crate::tui::test_support::make_test_tui()?;
+        let pointer = |kind| {
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 6,
                 row: 1,
                 modifiers: crossterm::event::KeyModifiers::NONE,
             })
@@ -1311,12 +1624,18 @@ mod tests {
 
         overlay.handle_event(&mut tui, pointer(MouseEventKind::Moved))?;
         assert_eq!(overlay.hovered_cell, Some(0));
-        overlay.handle_event(&mut tui, pointer(MouseEventKind::Down(MouseButton::Left)))?;
+        overlay.render_scrollback(area, &mut buf);
+        let style = buf[(6, 1)].style();
+        assert!(style.add_modifier.contains(ratatui::style::Modifier::BOLD));
+        assert!(
+            !style
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
 
-        assert!(matches!(
-            overlay.pending_interaction,
-            Some(HistoryCellInteraction::OpenPatchDiff { .. })
-        ));
+        overlay.handle_event(&mut tui, pointer(MouseEventKind::Down(MouseButton::Left)))?;
+        overlay.render_scrollback(area, &mut buf);
+        assert!(buffer_to_text(&buf, area).contains("output 15"));
         Ok(())
     }
 

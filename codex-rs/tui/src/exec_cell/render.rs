@@ -5,6 +5,7 @@ use super::model::ExecCall;
 use super::model::ExecCell;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell::HistoryCell;
+use crate::history_cell::InlineExpansionRegion;
 use crate::history_cell::plain_lines;
 use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
@@ -12,6 +13,8 @@ use crate::motion::activity_indicator;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::line_utils::prefix_lines;
 use crate::render::line_utils::push_owned_lines;
+use crate::terminal_hyperlinks::HyperlinkLine;
+use crate::terminal_hyperlinks::plain_hyperlink_lines;
 use crate::ui_consts::TRANSCRIPT_HINT;
 use crate::wrapping::RtOptions;
 use crate::wrapping::adaptive_wrap_line;
@@ -194,7 +197,9 @@ fn activity_marker(start_time: Option<Instant>, animations_enabled: bool) -> Spa
 
 impl HistoryCell for ExecCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        if self.is_exploring_cell() {
+        if self.is_collapsible_action_group() {
+            self.exploring_summary_lines()
+        } else if self.is_exploring_cell() {
             self.exploring_display_lines(width)
         } else {
             self.command_display_lines(width)
@@ -248,9 +253,168 @@ impl HistoryCell for ExecCell {
     fn raw_lines(&self) -> Vec<Line<'static>> {
         plain_lines(self.transcript_lines(u16::MAX))
     }
+
+    fn expanded_display_hyperlink_lines(&self, width: u16) -> Option<Vec<HyperlinkLine>> {
+        if self.is_collapsible_action_group() {
+            Some(plain_hyperlink_lines(self.exploring_display_lines(width)))
+        } else if self.has_expandable_command_output() {
+            Some(plain_hyperlink_lines(
+                self.command_display_lines_with_output(width, /*expanded_output*/ true),
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn has_inline_expansion(&self) -> bool {
+        self.is_collapsible_action_group() || self.has_expandable_command_output()
+    }
+
+    fn has_inline_transcript_expansion(&self) -> bool {
+        false
+    }
+
+    fn inline_expansion_regions(&self, width: u16, expanded: bool) -> Vec<InlineExpansionRegion> {
+        if self.is_collapsible_action_group() {
+            let width = self
+                .display_lines(width)
+                .first()
+                .map(Line::width)
+                .unwrap_or(0);
+            return vec![InlineExpansionRegion {
+                row: 0,
+                columns: 2..width,
+            }];
+        }
+        if !self.has_expandable_command_output() {
+            return Vec::new();
+        }
+        let lines = self.command_display_lines_with_output(width, expanded);
+        let output_start = lines.iter().position(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .starts_with(EXEC_DISPLAY_LAYOUT.output_block.initial_prefix)
+        });
+        output_start
+            .into_iter()
+            .flat_map(|start| start..lines.len())
+            .filter_map(|row| {
+                let line = &lines[row];
+                let end = line.width();
+                (end > 2).then_some(InlineExpansionRegion {
+                    row,
+                    columns: 2..end,
+                })
+            })
+            .collect()
+    }
 }
 
 impl ExecCell {
+    fn has_expandable_command_output(&self) -> bool {
+        matches!(self.calls.as_slice(), [call] if !self.is_exploring_cell()
+            && call.output.as_ref().is_some_and(|output| !output.aggregated_output.is_empty()))
+    }
+
+    fn is_collapsible_action_group(&self) -> bool {
+        self.is_exploring_cell()
+            && self.calls.iter().all(|call| {
+                call.output
+                    .as_ref()
+                    .is_none_or(|output| output.exit_code == 0)
+            })
+    }
+
+    fn exploring_summary_lines(&self) -> Vec<Line<'static>> {
+        let search_count = self
+            .calls
+            .iter()
+            .flat_map(|call| &call.parsed)
+            .filter(|parsed| matches!(parsed, ParsedCommand::Search { .. }))
+            .count();
+        let read_count = self
+            .calls
+            .iter()
+            .flat_map(|call| &call.parsed)
+            .filter_map(|parsed| match parsed {
+                ParsedCommand::Read { name, .. } => Some(name),
+                _ => None,
+            })
+            .unique()
+            .count();
+        let list_count = self
+            .calls
+            .iter()
+            .flat_map(|call| &call.parsed)
+            .filter(|parsed| matches!(parsed, ParsedCommand::ListFiles { .. }))
+            .count();
+        let active = self.is_active();
+        let mut spans = vec![
+            if self.is_active() {
+                activity_marker(self.active_start_time(), self.animations_enabled())
+            } else {
+                "•".dim()
+            },
+            " ".into(),
+        ];
+        let mut part_count = 0usize;
+        let mut push_part = |verb: &str, count: usize, singular: &str, plural: &str| {
+            if count == 0 {
+                return;
+            }
+            if part_count > 0 {
+                spans.push(", ".dim());
+            }
+            let rendered_verb = if part_count == 0 {
+                let mut chars = verb.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                    .unwrap_or_default()
+            } else {
+                verb.to_string()
+            };
+            spans.push(rendered_verb.into());
+            spans.push(" ".into());
+            spans.push(count.to_string().bold());
+            spans.push(" ".into());
+            spans.push(if count == 1 {
+                singular.to_string().into()
+            } else {
+                plural.to_string().into()
+            });
+            part_count += 1;
+        };
+        push_part(
+            if active {
+                "searching for"
+            } else {
+                "searched for"
+            },
+            search_count,
+            "pattern",
+            "patterns",
+        );
+        push_part(
+            if active { "reading" } else { "read" },
+            read_count,
+            "file",
+            "files",
+        );
+        push_part(
+            if active { "listing" } else { "listed" },
+            list_count,
+            "directory",
+            "directories",
+        );
+        if active {
+            spans.push("…".dim());
+        }
+        vec![Line::from(spans)]
+    }
+
     fn output_ellipsis_text(omitted: usize) -> String {
         format!("… +{omitted} lines ({TRANSCRIPT_HINT})")
     }
@@ -363,6 +527,14 @@ impl ExecCell {
     }
 
     fn command_display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.command_display_lines_with_output(width, /*expanded_output*/ false)
+    }
+
+    fn command_display_lines_with_output(
+        &self,
+        width: u16,
+        expanded_output: bool,
+    ) -> Vec<Line<'static>> {
         let [call] = &self.calls.as_slice() else {
             panic!("Expected exactly one call in a command display cell");
         };
@@ -440,7 +612,9 @@ impl ExecCell {
         }
 
         if let Some(output) = call.output.as_ref() {
-            let line_limit = if call.is_user_shell_command() {
+            let line_limit = if expanded_output {
+                output.aggregated_output.lines().count().max(1)
+            } else if call.is_user_shell_command() {
                 USER_SHELL_TOOL_CALL_MAX_LINES
             } else {
                 TOOL_CALL_MAX_LINES
@@ -488,15 +662,19 @@ impl ExecCell {
                     Span::from(layout.output_block.initial_prefix).dim(),
                     Span::from(layout.output_block.subsequent_prefix),
                 );
-                let trimmed_output = Self::truncate_lines_middle(
-                    &prefixed_output,
-                    display_limit,
-                    width,
-                    raw_output.omitted,
-                    Some(Line::from(
-                        Span::from(layout.output_block.subsequent_prefix).dim(),
-                    )),
-                );
+                let trimmed_output = if expanded_output {
+                    prefixed_output
+                } else {
+                    Self::truncate_lines_middle(
+                        &prefixed_output,
+                        display_limit,
+                        width,
+                        raw_output.omitted,
+                        Some(Line::from(
+                            Span::from(layout.output_block.subsequent_prefix).dim(),
+                        )),
+                    )
+                };
 
                 if !trimmed_output.is_empty() {
                     lines.extend(trimmed_output);
@@ -987,7 +1165,7 @@ mod tests {
     }
 
     #[test]
-    fn exploring_display_does_not_split_long_url_like_search_query() {
+    fn exploring_action_group_is_one_line_with_full_inline_detail() {
         let url_like = "example.test/api/v1/projects/alpha-team/releases/2026-02-17/builds/1234567890/artifacts/reports/performance/summary/detail/with/a/very/long/path";
         let call = ExecCall {
             call_id: "call-id".to_string(),
@@ -1005,11 +1183,21 @@ mod tests {
         };
 
         let cell = ExecCell::new(call, /*animations_enabled*/ false);
-        let rendered: Vec<String> = cell
+        let summary: Vec<String> = cell
             .display_lines(/*width*/ 36)
             .iter()
+            .map(render_line_text)
+            .collect();
+        assert_eq!(summary, vec!["• Searching for 1 pattern…".to_string()]);
+        assert!(cell.has_inline_expansion());
+
+        let rendered: Vec<String> = cell
+            .expanded_display_hyperlink_lines(/*width*/ 36)
+            .expect("routine action groups expand inline")
+            .iter()
             .map(|line| {
-                line.spans
+                line.line
+                    .spans
                     .iter()
                     .map(|span| span.content.as_ref())
                     .collect::<String>()

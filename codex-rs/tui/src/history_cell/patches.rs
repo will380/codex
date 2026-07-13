@@ -1,6 +1,7 @@
 //! Patch summaries and image-tool transcript helpers.
 
 use super::*;
+use crate::diff_render::calculate_add_remove_from_diff;
 use codex_utils_path_uri::LegacyAppPathString;
 
 #[derive(Debug)]
@@ -9,13 +10,27 @@ pub(crate) struct PatchHistoryCell {
     cwd: PathBuf,
 }
 
+impl PatchHistoryCell {
+    fn is_minor_update(&self) -> bool {
+        if self.changes.len() != 1 {
+            return false;
+        }
+        let Some(FileChange::Update { unified_diff, .. }) = self.changes.values().next() else {
+            return false;
+        };
+        let (added, removed) = calculate_add_remove_from_diff(unified_diff);
+        added.saturating_add(removed) <= 4
+    }
+}
+
 impl HistoryCell for PatchHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
-        compact_diff_preview(create_diff_summary(
-            &self.changes,
-            &self.cwd,
-            width as usize,
-        ))
+        let lines = create_diff_summary(&self.changes, &self.cwd, width as usize);
+        if self.is_minor_update() {
+            lines.into_iter().take(1).collect()
+        } else {
+            compact_diff_preview(lines)
+        }
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
@@ -34,16 +49,54 @@ impl HistoryCell for PatchHistoryCell {
         self.display_hyperlink_lines(width)
     }
 
-    fn transcript_interaction(&self) -> Option<HistoryCellInteraction> {
-        let cwd = AbsolutePathBuf::try_from(self.cwd.clone()).ok()?;
-        Some(HistoryCellInteraction::OpenPatchDiff {
-            changes: self.changes.clone(),
-            cwd,
-        })
+    fn expanded_display_hyperlink_lines(&self, width: u16) -> Option<Vec<HyperlinkLine>> {
+        Some(annotate_changed_file_paths(
+            create_diff_summary(&self.changes, &self.cwd, width as usize),
+            &self.changes,
+            &self.cwd,
+        ))
     }
 
-    fn has_transcript_interaction(&self) -> bool {
+    fn has_inline_expansion(&self) -> bool {
         true
+    }
+
+    fn inline_expansion_regions(&self, width: u16, expanded: bool) -> Vec<InlineExpansionRegion> {
+        let lines = if expanded {
+            create_diff_summary(&self.changes, &self.cwd, width as usize)
+        } else {
+            self.display_lines(width)
+        };
+        let mut regions = lines
+            .first()
+            .map(|line| InlineExpansionRegion {
+                row: 0,
+                columns: 2..line.width(),
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        if !expanded
+            && let Some((row, line)) = lines.iter().enumerate().find(|(_, line)| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+                    .trim_start()
+                    .starts_with("… +")
+            })
+        {
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            let start = text.width().saturating_sub(text.trim_start().width());
+            regions.push(InlineExpansionRegion {
+                row,
+                columns: start..line.width(),
+            });
+        }
+        regions
     }
 }
 /// Create a new `PendingPatch` cell that lists the file‑level summary of

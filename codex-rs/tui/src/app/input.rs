@@ -89,7 +89,7 @@ impl App {
         tui.frame_requester().schedule_frame();
     }
 
-    pub(super) async fn handle_key_event(
+    pub(crate) async fn handle_key_event(
         &mut self,
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,

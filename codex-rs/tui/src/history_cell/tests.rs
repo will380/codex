@@ -536,7 +536,36 @@ fn large_patch_shows_a_compact_preview_and_omitted_line_count() {
             .is_some_and(|line| line.contains("… +19 lines"))
     );
     assert!(!lines.iter().any(|line| line.contains("Click to inspect")));
-    assert!(cell.has_transcript_interaction());
+    assert!(cell.has_inline_expansion());
+    assert_eq!(
+        cell.expanded_display_hyperlink_lines(/*width*/ 80)
+            .expect("patches expose their full inline form")
+            .len(),
+        26
+    );
+}
+
+#[test]
+fn minor_single_file_update_collapses_to_its_headline() {
+    let cwd = test_path_buf("/tmp/project");
+    let cell = new_patch_event(
+        HashMap::from([(
+            PathBuf::from("src/small.rs"),
+            FileChange::Update {
+                unified_diff: "@@ -1 +1 @@\n-old\n+new\n".to_string(),
+                move_path: None,
+            },
+        )]),
+        &cwd,
+    );
+
+    let collapsed = render_lines(&cell.display_lines(/*width*/ 80));
+    assert_eq!(collapsed.len(), 1);
+    assert!(collapsed[0].contains("Edited"));
+    let expanded = cell
+        .expanded_display_hyperlink_lines(/*width*/ 80)
+        .expect("minor edits remain expandable inline");
+    assert!(expanded.len() > 1);
 }
 
 fn session_configured_event(model: &str) -> ThreadSessionState {

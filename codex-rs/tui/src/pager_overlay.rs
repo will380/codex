@@ -1503,7 +1503,32 @@ mod tests {
         overlay.render(area, &mut buf);
         assert!(buffer_to_text(&buf, area).contains("line 24"));
 
-        overlay.handle_event(&mut tui, pointer(MouseEventKind::Down(MouseButton::Left)))?;
+        let code_pointer = |kind| {
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: 10,
+                row: 2,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            })
+        };
+        overlay.handle_event(&mut tui, code_pointer(MouseEventKind::Moved))?;
+        overlay.render(area, &mut buf);
+        let code_style = buf[(10, 2)].style();
+        assert!(
+            code_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert!(
+            !code_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
+
+        overlay.handle_event(
+            &mut tui,
+            code_pointer(MouseEventKind::Down(MouseButton::Left)),
+        )?;
         assert!(!overlay.expanded_cells.contains(&0));
         Ok(())
     }

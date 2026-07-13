@@ -64,9 +64,13 @@ const NO_PREVIOUS_MESSAGE_TO_EDIT: &str = "No previous message to edit.";
 pub(crate) const SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE: &str =
     "Editing previous prompts is unavailable in side conversations.";
 
-fn anchored_scrollback_layout(area: Rect, desired_composer_height: u16) -> (Rect, Rect, Rect) {
+fn anchored_scrollback_layout(
+    area: Rect,
+    desired_composer_height: u16,
+    show_jump_indicator: bool,
+) -> (Rect, Rect, Rect) {
     let composer_height = desired_composer_height.min(area.height.saturating_sub(2));
-    let indicator_height = u16::from(area.height > composer_height);
+    let indicator_height = u16::from(show_jump_indicator && area.height > composer_height);
     let transcript_height = area
         .height
         .saturating_sub(composer_height)
@@ -89,6 +93,22 @@ fn handle_mouse_scrollback_paste_burst_tick(
 ) -> bool {
     matches!(event, TuiEvent::Draw | TuiEvent::Resize)
         && chat_widget.handle_paste_burst_tick(frame_requester)
+}
+
+fn should_open_mouse_history(
+    mouse_event: MouseEvent,
+    screen_height: u16,
+    composer_height: u16,
+) -> bool {
+    if mouse_event.kind == MouseEventKind::ScrollUp {
+        return true;
+    }
+    let points_at_history = mouse_event.row < screen_height.saturating_sub(composer_height);
+    points_at_history
+        && matches!(
+            mouse_event.kind,
+            MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left)
+        )
 }
 
 /// Aggregates all backtrack-related state used by the App.
@@ -350,12 +370,10 @@ impl App {
             chat_widget.active_cell_display_hyperlink_lines(w)
         });
         let composer_height = chat_widget.composer_surface_height(width);
-        let (history, indicator, composer) = anchored_scrollback_layout(area, composer_height);
+        let (history, _indicator, composer) =
+            anchored_scrollback_layout(area, composer_height, /*show_jump_indicator*/ false);
         let mut prepared = ratatui::buffer::Buffer::empty(area);
         transcript.render_scrollback(history, &mut prepared);
-        Paragraph::new(Line::from("↓ Jump to latest · click or Ctrl+End").light_blue())
-            .centered()
-            .render(indicator, &mut prepared);
         chat_widget.render_composer_surface(composer, &mut prepared);
         let cursor = chat_widget.composer_surface_cursor_pos(composer);
         let cursor_style = chat_widget.composer_surface_cursor_style(composer);
@@ -397,7 +415,9 @@ impl App {
         tui: &mut tui::Tui,
         mouse_event: MouseEvent,
     ) -> Result<()> {
-        if mouse_event.kind != MouseEventKind::ScrollUp {
+        let size = tui.terminal.size()?;
+        let composer_height = self.chat_widget.composer_surface_height(size.width);
+        if !should_open_mouse_history(mouse_event, size.height, composer_height) {
             return Ok(());
         }
 
@@ -421,7 +441,25 @@ impl App {
 
         let viewport = tui.terminal.viewport_area;
         let composer_height = self.chat_widget.composer_surface_height(viewport.width);
-        let (_, indicator, _composer) = anchored_scrollback_layout(viewport, composer_height);
+        let is_scrolled_away = self
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| !overlay.is_scrolled_to_bottom());
+        let (_, indicator, composer) =
+            anchored_scrollback_layout(viewport, composer_height, is_scrolled_away);
+        if !is_scrolled_away
+            && matches!(
+                event,
+                TuiEvent::Mouse(MouseEvent {
+                    kind: MouseEventKind::Moved,
+                    row,
+                    ..
+                }) if row >= composer.y
+            )
+        {
+            self.close_transcript_overlay(tui);
+            return Ok(true);
+        }
         let pointer_is_over_indicator = matches!(
             event,
             TuiEvent::Mouse(MouseEvent { column, row, .. })
@@ -661,19 +699,25 @@ impl App {
                 });
                 if mouse_scrollback_active {
                     let composer_height = chat_widget.composer_surface_height(width);
-                    let (transcript, indicator, composer) =
-                        anchored_scrollback_layout(frame.area(), composer_height);
+                    let show_jump_indicator = !t.is_scrolled_to_bottom();
+                    let (transcript, indicator, composer) = anchored_scrollback_layout(
+                        frame.area(),
+                        composer_height,
+                        show_jump_indicator,
+                    );
                     t.render_scrollback(transcript, frame.buffer);
-                    let indicator_line =
-                        Line::from("↓ Jump to latest · click or Ctrl+End").light_blue();
-                    let indicator_line = if indicator_hovered {
-                        indicator_line.reversed().bold()
-                    } else {
-                        indicator_line
-                    };
-                    Paragraph::new(indicator_line)
-                        .centered()
-                        .render(indicator, frame.buffer);
+                    if show_jump_indicator {
+                        let indicator_line =
+                            Line::from("↓ Jump to latest · click or Ctrl+End").light_blue();
+                        let indicator_line = if indicator_hovered {
+                            indicator_line.reversed().bold()
+                        } else {
+                            indicator_line
+                        };
+                        Paragraph::new(indicator_line)
+                            .centered()
+                            .render(indicator, frame.buffer);
+                    }
                     chat_widget.render_composer_surface(composer, frame.buffer);
                     if let Some((x, y)) = chat_widget.composer_surface_cursor_pos(composer) {
                         frame.set_cursor_style(chat_widget.composer_surface_cursor_style(composer));
@@ -1011,13 +1055,51 @@ mod tests {
     #[test]
     fn anchored_scrollback_keeps_indicator_directly_above_full_height_composer() {
         let area = Rect::new(0, 0, 80, 30);
-        let (transcript, indicator, composer) = anchored_scrollback_layout(area, 6);
+        let (transcript, indicator, composer) =
+            anchored_scrollback_layout(area, 6, /*show_jump_indicator*/ true);
 
         assert_eq!(transcript, Rect::new(0, 0, 80, 23));
         assert_eq!(indicator, Rect::new(0, 23, 80, 1));
         assert_eq!(composer, Rect::new(0, 24, 80, 6));
         assert_eq!(indicator.bottom(), composer.y);
         assert_eq!(composer.bottom(), area.bottom());
+    }
+
+    #[test]
+    fn anchored_interactive_history_uses_indicator_row_only_after_scrolling() {
+        let area = Rect::new(0, 0, 80, 30);
+        let (transcript, indicator, composer) =
+            anchored_scrollback_layout(area, 6, /*show_jump_indicator*/ false);
+
+        assert_eq!(transcript, Rect::new(0, 0, 80, 24));
+        assert_eq!(indicator.height, 0);
+        assert_eq!(composer, Rect::new(0, 24, 80, 6));
+    }
+
+    #[test]
+    fn pointer_move_or_click_over_normal_history_opens_interactive_surface() {
+        let event = |kind, row| MouseEvent {
+            kind,
+            column: 10,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        assert!(should_open_mouse_history(
+            event(MouseEventKind::Moved, 10),
+            /*screen_height*/ 30,
+            /*composer_height*/ 6,
+        ));
+        assert!(should_open_mouse_history(
+            event(MouseEventKind::Down(MouseButton::Left), 10),
+            /*screen_height*/ 30,
+            /*composer_height*/ 6,
+        ));
+        assert!(!should_open_mouse_history(
+            event(MouseEventKind::Moved, 26),
+            /*screen_height*/ 30,
+            /*composer_height*/ 6,
+        ));
     }
 
     #[tokio::test]

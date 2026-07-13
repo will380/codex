@@ -75,16 +75,28 @@ impl HistoryCell for PatchHistoryCell {
             })
             .into_iter()
             .collect::<Vec<_>>();
-        if !expanded
-            && let Some((row, line)) = lines.iter().enumerate().find(|(_, line)| {
-                line.spans
+        if expanded {
+            regions.extend(lines.iter().enumerate().skip(1).filter_map(|(row, line)| {
+                let text = line
+                    .spans
                     .iter()
                     .map(|span| span.content.as_ref())
-                    .collect::<String>()
-                    .trim_start()
-                    .starts_with("… +")
-            })
-        {
+                    .collect::<String>();
+                let start = text.width().saturating_sub(text.trim_start().width());
+                let end = line.width();
+                (end > start).then_some(InlineExpansionRegion {
+                    row,
+                    columns: start..end,
+                })
+            }));
+        } else if let Some((row, line)) = lines.iter().enumerate().find(|(_, line)| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+                .trim_start()
+                .starts_with("… +")
+        }) {
             let text = line
                 .spans
                 .iter()

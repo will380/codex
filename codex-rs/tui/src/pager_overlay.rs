@@ -1047,46 +1047,60 @@ impl TranscriptOverlay {
         let Some(start) = self.view.layout_starts.get(index).copied() else {
             return;
         };
-        let (content_start, is_exec) = if let Some(cell) = self.cells.get(index) {
-            (
-                start + usize::from(index > 0 && !cell.is_stream_continuation()),
-                cell.as_any().is::<ExecCell>(),
-            )
-        } else if index == self.cells.len() {
-            let Some(key) = self.live_tail_key else {
+        let (content_start, is_exec, interactive_regions) =
+            if let Some(cell) = self.cells.get(index) {
+                let expanded = self.expanded_cells.contains(&index);
+                (
+                    start + usize::from(index > 0 && !cell.is_stream_continuation()),
+                    cell.as_any().is::<ExecCell>(),
+                    cell.inline_expansion_regions(area.width, expanded),
+                )
+            } else if index == self.cells.len() {
+                let Some(key) = self.live_tail_key else {
+                    return;
+                };
+                (
+                    start + usize::from(!self.cells.is_empty() && !key.is_stream_continuation),
+                    key.is_exec,
+                    self.live_tail_regions.clone(),
+                )
+            } else {
                 return;
             };
-            (
-                start + usize::from(!self.cells.is_empty() && !key.is_stream_continuation),
-                key.is_exec,
-            )
+        let hover_regions = if is_exec && region.row > 0 {
+            interactive_regions
+                .into_iter()
+                .filter(|output_region| output_region.row > 0)
+                .collect()
         } else {
-            return;
+            vec![region.clone()]
         };
-        let region_row = content_start.saturating_add(region.row);
-        if region_row < self.view.scroll_offset {
-            return;
-        }
-        let viewport_row = region_row - self.view.scroll_offset;
-        if viewport_row >= usize::from(area.height) {
-            return;
-        }
-        let text_start = area
-            .x
-            .saturating_add(u16::try_from(region.columns.start).unwrap_or(u16::MAX));
-        let text_end = area
-            .x
-            .saturating_add(u16::try_from(region.columns.end).unwrap_or(u16::MAX))
-            .min(area.right());
-        let y = area
-            .y
-            .saturating_add(u16::try_from(viewport_row).unwrap_or(u16::MAX));
-        let mut hover_style = Style::default().bold();
-        if is_exec && region.row > 0 {
-            hover_style = hover_style.fg(Color::Gray).remove_modifier(Modifier::DIM);
-        }
-        for x in text_start..text_end {
-            buf[(x, y)].set_style(hover_style);
+        for region in hover_regions {
+            let region_row = content_start.saturating_add(region.row);
+            if region_row < self.view.scroll_offset {
+                continue;
+            }
+            let viewport_row = region_row - self.view.scroll_offset;
+            if viewport_row >= usize::from(area.height) {
+                continue;
+            }
+            let text_start = area
+                .x
+                .saturating_add(u16::try_from(region.columns.start).unwrap_or(u16::MAX));
+            let text_end = area
+                .x
+                .saturating_add(u16::try_from(region.columns.end).unwrap_or(u16::MAX))
+                .min(area.right());
+            let y = area
+                .y
+                .saturating_add(u16::try_from(viewport_row).unwrap_or(u16::MAX));
+            let mut hover_style = Style::default().bold();
+            if is_exec && region.row > 0 {
+                hover_style = hover_style.fg(Color::Gray).remove_modifier(Modifier::DIM);
+            }
+            for x in text_start..text_end {
+                buf[(x, y)].set_style(hover_style);
+            }
         }
     }
 
@@ -1741,6 +1755,14 @@ mod tests {
                 .contains(ratatui::style::Modifier::DIM)
         );
         assert_eq!(output_style.fg, Some(ratatui::style::Color::Gray));
+        let other_output_style = buf[(6, 2)].style();
+        assert!(
+            other_output_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "hovering one output row should brighten the complete output block"
+        );
+        assert!(!other_output_style.add_modifier.contains(Modifier::DIM));
 
         overlay.handle_event(
             &mut tui,
@@ -1885,6 +1907,14 @@ mod tests {
                 .contains(ratatui::style::Modifier::BOLD)
         );
         assert!(!output_style.add_modifier.contains(Modifier::DIM));
+        let other_output_style = buf[(6, 2)].style();
+        assert!(
+            other_output_style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "live output should hover as one complete block"
+        );
+        assert!(!other_output_style.add_modifier.contains(Modifier::DIM));
         overlay.handle_event(
             &mut tui,
             pointer(MouseEventKind::Down(MouseButton::Left), 16),

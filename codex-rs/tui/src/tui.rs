@@ -173,6 +173,25 @@ mod tests {
             "expected stale cells inside the new viewport to be cleared, rows: {rows:?}"
         );
     }
+
+    #[test]
+    fn resize_reflow_keeps_shorter_restored_viewport_bottom_anchored() {
+        let width = 80;
+        let screen_height = 30;
+        let backend = VT100Backend::new(width, screen_height);
+        let mut terminal =
+            CustomTerminal::with_options_and_cursor_position(backend, Position { x: 0, y: 29 })
+                .expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 10, width, 20));
+
+        let needs_full_repaint =
+            super::Tui::update_inline_viewport_for_resize_reflow(&mut terminal, /*height*/ 6)
+                .expect("resize restored viewport");
+
+        assert!(needs_full_repaint);
+        assert_eq!(terminal.viewport_area, Rect::new(0, 24, width, 6));
+        assert_eq!(terminal.viewport_area.bottom(), screen_height);
+    }
 }
 
 pub fn set_modes() -> Result<()> {
@@ -845,10 +864,13 @@ impl Tui {
     /// Unlike the legacy draw path, this path does not scroll rows above the viewport when the
     /// terminal shrinks. Resize reflow owns rebuilding those rows from transcript source, so
     /// scrolling here would move the viewport once and then replay history into the wrong row.
-    fn update_inline_viewport_for_resize_reflow(
-        terminal: &mut Terminal,
+    fn update_inline_viewport_for_resize_reflow<B>(
+        terminal: &mut CustomTerminal<B>,
         height: u16,
-    ) -> Result<bool> {
+    ) -> Result<bool>
+    where
+        B: Backend + Write,
+    {
         let size = terminal.size()?;
         let terminal_height_shrank = size.height < terminal.last_known_screen_size.height;
         let terminal_height_grew = size.height > terminal.last_known_screen_size.height;
@@ -860,6 +882,15 @@ impl Tui {
         area.height = height.min(size.height);
         area.width = size.width;
         let mut needs_full_repaint = false;
+
+        // The normal chat surface is bottom-anchored. In particular, leaving mouse scrollback may
+        // replace a tall active transcript tail with a much shorter composer in one frame. Keep the
+        // old bottom edge fixed so that shrink does not strand the composer above a black gap.
+        if viewport_was_bottom_aligned
+            && (area.height != previous_area.height || terminal_height_grew)
+        {
+            area.y = size.height.saturating_sub(area.height);
+        }
 
         if area.bottom() > size.height {
             let scroll_by = area.bottom() - size.height;

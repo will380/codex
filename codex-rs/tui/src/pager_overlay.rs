@@ -115,6 +115,12 @@ impl Overlay {
             Overlay::Static(_) => false,
         }
     }
+
+    pub(crate) fn scroll_to_bottom(&mut self) {
+        if let Overlay::Transcript(o) = self {
+            o.scroll_to_bottom();
+        }
+    }
 }
 
 fn first_or_empty(bindings: &[KeyBinding]) -> Vec<KeyBinding> {
@@ -929,6 +935,10 @@ impl TranscriptOverlay {
     /// tail; if the user has scrolled up, we avoid driving animation work that they cannot see.
     pub(crate) fn is_scrolled_to_bottom(&self) -> bool {
         self.view.is_scrolled_to_bottom()
+    }
+
+    pub(crate) fn scroll_to_bottom(&mut self) {
+        self.view.scroll_offset = usize::MAX;
     }
 
     fn rebuild_renderables(&mut self) {
@@ -2237,6 +2247,29 @@ mod tests {
             lines: vec!["tail".into()],
         }));
 
+        assert_eq!(overlay.view.scroll_offset, usize::MAX);
+    }
+
+    #[test]
+    fn transcript_overlay_jump_to_bottom_stays_on_managed_surface() {
+        let mut overlay = transcript_overlay(
+            (0..20)
+                .map(|i| {
+                    Arc::new(TestCell {
+                        lines: vec![Line::from(format!("line{i}"))],
+                    }) as Arc<dyn HistoryCell>
+                })
+                .collect(),
+        );
+        let mut term = Terminal::new(TestBackend::new(40, 12)).expect("term");
+        term.draw(|f| overlay.render(f.area(), f.buffer_mut()))
+            .expect("draw");
+        overlay.view.scroll_offset = 0;
+        assert!(!overlay.is_scrolled_to_bottom());
+
+        overlay.scroll_to_bottom();
+
+        assert!(overlay.is_scrolled_to_bottom());
         assert_eq!(overlay.view.scroll_offset, usize::MAX);
     }
 

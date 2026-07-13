@@ -6264,6 +6264,53 @@ async fn side_backtrack_rejection_reports_unavailable_message_snapshot() {
         rendered
     );
 }
+
+#[tokio::test]
+async fn mouse_scrollback_at_latest_stays_active_when_pointer_enters_composer() -> Result<()> {
+    let mut app = make_test_app().await;
+    app.transcript_cells = vec![Arc::new(UserHistoryCell {
+        message: "visible submitted message".to_string(),
+        text_elements: Vec::new(),
+        local_image_paths: Vec::new(),
+        remote_image_urls: Vec::new(),
+    }) as Arc<dyn HistoryCell>];
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let mut app_server = start_config_write_test_app_server(&app).await?;
+    let size = tui.terminal.size()?;
+
+    app.handle_mouse_event(
+        &mut tui,
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        },
+    )?;
+    app.overlay
+        .as_mut()
+        .expect("mouse scrollback overlay")
+        .scroll_to_bottom();
+
+    let handled = app
+        .handle_backtrack_overlay_event(
+            &mut tui,
+            &mut app_server,
+            TuiEvent::Mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Moved,
+                column: 1,
+                row: size.height.saturating_sub(1),
+                modifiers: KeyModifiers::NONE,
+            }),
+        )
+        .await?;
+
+    assert!(handled);
+    assert!(app.mouse_scrollback_active);
+    assert!(app.overlay.is_some());
+    Ok(())
+}
+
 async fn start_config_write_test_app_server(app: &App) -> Result<AppServerSession> {
     Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await
 }

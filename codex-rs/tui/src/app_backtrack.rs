@@ -453,21 +453,8 @@ impl App {
             .overlay
             .as_ref()
             .is_some_and(|overlay| !overlay.is_scrolled_to_bottom());
-        let (_, indicator, composer) =
+        let (_, indicator, _composer) =
             anchored_scrollback_layout(viewport, composer_height, is_scrolled_away);
-        if !is_scrolled_away
-            && matches!(
-                event,
-                TuiEvent::Mouse(MouseEvent {
-                    kind: MouseEventKind::Moved,
-                    row,
-                    ..
-                }) if row >= composer.y
-            )
-        {
-            self.close_transcript_overlay(tui);
-            return Ok(true);
-        }
         let pointer_is_over_indicator = matches!(
             event,
             TuiEvent::Mouse(MouseEvent { column, row, .. })
@@ -506,7 +493,13 @@ impl App {
             }) if modifiers.contains(KeyModifiers::CONTROL)
         );
         if jump_requested {
-            self.close_transcript_overlay(tui);
+            // Keep the managed scrollback surface alive at the bottom. Leaving the alternate
+            // screen here restores an older inline buffer for one frame, which can erase message
+            // text or leave stale composer rows behind while the pointer crosses into the composer.
+            if let Some(overlay) = &mut self.overlay {
+                overlay.scroll_to_bottom();
+            }
+            tui.frame_requester().schedule_frame();
             return Ok(true);
         }
 
@@ -524,23 +517,8 @@ impl App {
 
         if let TuiEvent::Key(key_event) = &event {
             let key_event = *key_event;
-            let had_draft = !self.chat_widget.composer_is_empty();
             self.handle_key_event(tui, app_server, key_event).await;
-            let submitted = had_draft
-                && self.chat_widget.composer_is_empty()
-                && matches!(
-                    key_event,
-                    KeyEvent {
-                        code: KeyCode::Enter,
-                        kind: KeyEventKind::Press,
-                        ..
-                    }
-                );
-            if submitted {
-                self.close_transcript_overlay(tui);
-            } else {
-                tui.frame_requester().schedule_frame();
-            }
+            tui.frame_requester().schedule_frame();
             return Ok(true);
         }
 
@@ -550,22 +528,7 @@ impl App {
             return Ok(true);
         }
 
-        let scrolls_down = matches!(
-            event,
-            TuiEvent::Mouse(MouseEvent {
-                kind: MouseEventKind::ScrollDown,
-                ..
-            })
-        );
         self.overlay_forward_event(tui, event)?;
-        if scrolls_down
-            && self
-                .overlay
-                .as_ref()
-                .is_some_and(Overlay::is_scrolled_to_bottom)
-        {
-            self.close_transcript_overlay(tui);
-        }
         Ok(true)
     }
 
